@@ -44,8 +44,33 @@ else:
 logger.info(f"Using vllm version {vllm.__version__}")
 
 
+def _is_cumem_available() -> bool:
+    try:
+        from vllm.device_allocator.cumem import cumem_available
+
+        return bool(cumem_available)
+    except Exception as exc:
+        logger.warning("Failed to probe vLLM cumem allocator availability: %s", exc)
+        return False
+
+
+def _resolve_enable_sleep_mode(requested: bool) -> bool:
+    if not requested:
+        return False
+
+    if _is_cumem_available():
+        return True
+
+    logger.warning(
+        "vLLM sleep mode requested but cumem allocator is unavailable on this platform. "
+        "Disabling sleep mode and continuing without vLLM offload/reload."
+    )
+    return False
+
+
 async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
-    kwargs["enable_sleep_mode"] = True
+    requested_sleep_mode = kwargs.pop("enable_sleep_mode", True)
+    kwargs["enable_sleep_mode"] = _resolve_enable_sleep_mode(requested_sleep_mode)
 
     if "worker_extension_cls" not in kwargs:
         # VLLM_USE_V1 is deprecated in vllm>=0.11.1
@@ -135,6 +160,7 @@ async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
             stat_loggers=None,
         )
 
+    setattr(async_llm, "roll_sleep_mode_enabled", kwargs["enable_sleep_mode"])
     await async_llm.custom_init_worker()
 
     return async_llm
