@@ -12,6 +12,7 @@ from vllm.usage.usage_lib import UsageContext
 
 from roll.platforms import current_platform
 import roll.third_party.vllm.fp8 as fp8
+from roll.third_party.vllm.versioning import supports_vllm_0_11_v0_ray_executor, uses_vllm_0_11_adapter
 from roll.utils.import_utils import safe_import_class
 from roll.utils.logging import get_logger
 
@@ -25,9 +26,13 @@ if Version("0.8.4") == Version(vllm.__version__):
 elif Version("0.10.2") == Version(vllm.__version__):
     ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_10_2.ray_distributed_executor.CustomRayDistributedExecutor")
     ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_10_2.v1.ray_distributed_executor.CustomRayDistributedExecutor")
-elif Version("0.11.0") == Version(vllm.__version__) or Version("0.11.1rc1") == Version(vllm.__version__) or Version("0.11.1rc2.dev0+gc3a722fcb.d20251021") == Version(vllm.__version__):
-    ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_11_0.ray_distributed_executor.CustomRayDistributedExecutor")
-    ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_11_0.v1.ray_distributed_executor.CustomRayDistributedExecutor")
+elif uses_vllm_0_11_adapter(vllm.__version__):
+    ray_executor_class_v0 = None
+    if supports_vllm_0_11_v0_ray_executor(vllm.__version__):
+        ray_executor_class_v0 = safe_import_class("roll.third_party.vllm.vllm_0_11_0.ray_distributed_executor.CustomRayDistributedExecutor")
+        ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_11_0.v1.ray_distributed_executor.CustomRayDistributedExecutor")
+    else:
+        ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_12_0.ray_distributed_executor.CustomRayDistributedExecutor")
 elif Version("0.12.0") == Version(vllm.__version__):
     ray_executor_class_v0 = None  # V0 deprecated
     ray_executor_class_v1 = safe_import_class("roll.third_party.vllm.vllm_0_12_0.ray_distributed_executor.CustomRayDistributedExecutor")
