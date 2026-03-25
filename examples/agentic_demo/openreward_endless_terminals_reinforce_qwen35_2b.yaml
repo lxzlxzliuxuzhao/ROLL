@@ -1,15 +1,13 @@
-# OpenReward + EndlessTerminals + IPA chunk-level loss config
-# Based on agent_val_rock_swe_IPA_qwen35_2b.yaml but replaces ROCK with OpenReward.
+# OpenReward + EndlessTerminals + STEP_REINFORCE (vanilla PG) config
+# Simpler baseline without IPA chunk-level loss.
 # The model IS the agent — no iflow, no sandbox, no anti_call_llm.
 #
 # Usage:
+#   bash examples/agentic_demo/run_openreward_endless_terminals.sh reinforce
+#   # or directly:
 #   python examples/start_agentic_pipeline.py \
 #     --config_path agentic_demo \
-#     --config_name openreward_endless_terminals_IPA_qwen35_2b
-#
-# For REINFORCE instead of IPA, change:
-#   pg_variant: "vanilla"
-#   adv_estimator: "reinforce"
+#     --config_name openreward_endless_terminals_reinforce_qwen35_2b
 
 defaults:
   - ../config/deepspeed_zero@_here_
@@ -22,7 +20,7 @@ hydra:
     dir: .
   output_subdir: null
 
-exp_name: "openreward_endless_terminals_IPA_qwen35_2b"
+exp_name: "openreward_endless_terminals_reinforce_qwen35_2b"
 seed: 42
 
 logging_dir: ./output/logs
@@ -61,39 +59,22 @@ sequence_length: 32768
 
 max_tokens_per_step: 4096
 
-# --- IPA chunk-level loss config (identical to ROCK config) ---
+# --- Vanilla STEP_REINFORCE config ---
+advantage_clip: 0.2
 ppo_epochs: 1
 adv_estimator: "step_reinforce"
 batch_adjust_mode: "random_sample"
-step_reward_gamma: 0.95                  # chunk-level temporal credit: G_k = 0.95^{K-k} * R_final
-ipa_failure_reward: ~                    # positive rewards only — no penalty for failures
-ratio_type: "segment"                    # chunk-level geometric mean IS ratio
+step_reward_gamma: 1.0
 
 init_kl_coef: 0.0
-whiten_advantages: false                 # IPA uses absolute returns, no relative ranking
+whiten_advantages: true
 entropy_loss_coef: 0
 max_grad_norm: 1.0
 
-# Non-trivial IS ratio: use vLLM rollout logprobs as old_log_probs (not recomputed Megatron)
-force_disable_old_logprobs_recompute: true
-
-# Train-infer mismatch mask (paper Section 8): chunk-level segment filter
-train_infer_correction:
-  is_weight:
-    enabled: false                       # IPA handles IS internally
-  filters:
-    - enabled: true
-      agg_type: segment                  # chunk-level geometric mean mismatch
-      ratio_enabled: true
-      ratio_low: 0.0
-      ratio_high: 5.0                    # threshold H; chunks above are masked out
-
-# --- Model configs (identical to ROCK config) ---
+# --- Model configs ---
 pretrain: /home/ubuntu/ALE-latest/model-checkpoints/Qwen3.5-2B
 reward_pretrain: /home/ubuntu/ALE-latest/model-checkpoints/Qwen3.5-2B
 actor_train:
-  worker_cls: roll.pipeline.agentic.agentic_actor_pg_worker.ActorWorker
-  pg_variant: "ipa_chunk"                # chunk-level IPA loss (paper Eq. 9)
   model_args:
     flash_attn: sdpa
     attn_implementation: sdpa
@@ -167,19 +148,18 @@ reference:
   device_mapping: list(range(0,4))
   infer_batch_size: 1
 
-# IPA uses absolute returns — no reward normalization
 reward_normalization:
   grouping: traj_group_id
   method: identity
 
-# --- Environment config (OpenReward — replaces ROCK) ---
-max_actions_per_traj: 16                 # 16 turns max (matches ROCK config)
+# --- Environment config (OpenReward) ---
+max_actions_per_traj: 16
 env_manager_cls: roll.pipeline.agentic.env_manager.agent_native_env_manager.AgentNativeStepEnvManager
 
 train_env_manager:
   max_env_num_per_worker: 1
   num_env_groups: 1
-  group_size: 1                         # 16 trajectories per batch
+  group_size: 1
   tags: [OpenRewardEndlessTerminalsTrain]
   num_groups_partition: [1]
 
