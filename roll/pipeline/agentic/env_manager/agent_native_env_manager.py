@@ -18,9 +18,6 @@ from roll.pipeline.agentic.env_manager.traj_env_manager import TrajEnvManager
 from roll.utils.constants import GenerateStopReason, EpisodeStopReason
 from roll.utils.functionals import pad_to_length, aggregate_metrics
 from roll.utils.hash_utils import compute_object_hash
-from roll.utils.logging import get_logger
-
-_observe_logger = get_logger()
 
 
 class AgentNativeStepEnvManager(TrajEnvManager):
@@ -194,17 +191,7 @@ class AgentNativeStepEnvManager(TrajEnvManager):
             content["infer_logprobs"] = infer_logprobs.tolist()
 
         content["response_ids"] = response_ids
-        decoded_response = self.tokenizer.decode(response_ids, skip_special_tokens=True)
-        content["messages"].append({"role": "assistant", "content": decoded_response})
-
-        # --- Observability: log model output ---
-        _observe_logger.info(
-            "[OBSERVE][MODEL_OUTPUT] step=%d response_tokens=%d has_tool_call=%s response=%.500s",
-            self.rollout_cache.step, len(response_ids),
-            "<tool_call>" in decoded_response,
-            decoded_response.replace("\n", "\\n"),
-        )
-
+        content["messages"].append({"role": "assistant", "content": self.tokenizer.decode(response_ids, skip_special_tokens=True)})
         lm_output.meta_info["stop_reason"] = GenerateStopReason.FINISH
         return lm_output
 
@@ -234,15 +221,6 @@ class AgentNativeStepEnvManager(TrajEnvManager):
         current_cache["prompt_ids"] = prompt_ids
         current_cache['state_hash'] = compute_object_hash(messages)
         current_cache['messages'] = messages
-
-        # --- Observability: log model input ---
-        prompt_text = self.tokenizer.decode(prompt_ids, skip_special_tokens=False)
-        _observe_logger.info(
-            "[OBSERVE][MODEL_INPUT] step=%d num_messages=%d prompt_tokens=%d tools=%d prompt_start=%.200s prompt_end=%.200s",
-            self.rollout_cache.step, len(messages), len(prompt_ids), len(self.tools),
-            prompt_text[:200].replace("\n", "\\n"),
-            prompt_text[-200:].replace("\n", "\\n"),
-        )
         return lm_input
 
     def formulate_rollouts(self, rollout_cache: RolloutCache):
