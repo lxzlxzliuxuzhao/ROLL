@@ -235,7 +235,7 @@ class AgenticPipeline(BasePipeline):
                     # PHASE 3: Model Update
                     with Timer(name="model_update", logger=None) as model_update_timer:
                         model_update_metrics: Dict = self.model_update(global_step)
-                    metrics["time/step_model_update"] =model_update_timer.last
+                    metrics["timing.weight_sync"] = model_update_timer.last
                     metrics.update(model_update_metrics)
 
                     # PHASE 4: init kv cache
@@ -281,14 +281,14 @@ class AgenticPipeline(BasePipeline):
                             sample_uuids = [f"{traj_id}_{i}" for i, traj_id in enumerate(batch.non_tensor_batch['traj_id'])]
                             batch.non_tensor_batch['sample_uuid'] = np.array(sample_uuids, dtype=object)
                             if "get_batch_return_start_time" in batch.meta_info:
-                                metrics["time/get_batch_cost_train"] = time.time() - batch.meta_info.pop("get_batch_return_start_time")
+                                metrics["timing.rollout.get_batch"] = time.time() - batch.meta_info.pop("get_batch_return_start_time")
                             actor_infer_metrics = self.actor_infer.get_metrics()
                             metrics.update(reduce_metrics(actor_infer_metrics.meta_info.pop("metrics", {})))
                             metrics.update(compute_rollout_traj_metrics(batch))
 
                             dump_rollout_trajectories(self.pipeline_config.rollout_dump_dir, global_step, batch)
 
-                        metrics["time/step_rollout"] = rollout_timer.last
+                        metrics["timing.rollout"] = rollout_timer.last
                         metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
                         batch.meta_info["global_step"] = global_step
                         batch.meta_info["_broadcast_non_tensor_batch"] = True
@@ -300,7 +300,7 @@ class AgenticPipeline(BasePipeline):
 
                     if len(val_metrics) > 0:
                         metrics.update(val_metrics)
-                        metrics["time/step_val"] = val_timer.last
+                        metrics["timing.validation"] = val_timer.last
 
                     if not self.pipeline_config.async_pipeline:
                         # Suspend scheduler before offload actor infer, because there may be
@@ -336,7 +336,7 @@ class AgenticPipeline(BasePipeline):
                             shrink_metrics = ray.get(self.train_rollout_scheduler.shrink_sampler.remote(target_gpus))
                             logger.info(f"Shrink sampler: {shrink_metrics}")
                             metrics.update({"shrink/" + k: v for k, v in shrink_metrics.items()})
-                        metrics["time/step_shrink"] = shrink_timer.last
+                        metrics["timing.scheduler.shrink"] = shrink_timer.last
 
                     batch = compute_discounted_returns(batch, self.pipeline_config.adv_estimator, self.pipeline_config.step_reward_gamma)
 
@@ -375,7 +375,7 @@ class AgenticPipeline(BasePipeline):
                             avg_ref_log_prob = masked_mean(batch.batch["ref_log_probs"], batch.batch["response_mask"][:, 1:])
                             metrics.update(reduce_metrics(ref_log_probs.meta_info.pop("metrics", {})))
                             metrics.update({"critic/ref_log_prob/mean": avg_ref_log_prob.item()})
-                    metrics["time/step_ref_log_probs_values_reward"] = cal_timer.last
+                    metrics["timing.reward.ref_logprob"] = cal_timer.last
 
                     # PHASE 12: Old Log Probs & Values
                     with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer:
@@ -423,14 +423,14 @@ class AgenticPipeline(BasePipeline):
                             avg_ref_log_prob = masked_mean(batch.batch["ref_log_probs"], batch.batch["response_mask"][:, 1:])
                             metrics.update({"critic/ref_log_prob/mean": avg_ref_log_prob.item()})
 
-                    metrics["time/step_old_log_probs_values"] = cal_old_logpb_timer.last
+                    metrics["timing.policy_eval.logprob"] = cal_old_logpb_timer.last
 
                     # TODO 当前这个还没用处
                     with Timer(name="cal_response_level_mask", logger=None) as timer:
                         # TODO 补充完善的过滤要求，不同环境需要维持统一过滤标识
                         batch, mask_metrics = get_agentic_response_level_mask(batch, self.pipeline_config)
                         metrics.update(mask_metrics)
-                    metrics["time/step_cal_response_level_mask"] = timer.last
+                    metrics["timing.reward.response_mask"] = timer.last
 
                     # PHASE 13: Advantage Computation
                     with Timer(name="cal_response_norm_rewards", logger=None) as timer:
@@ -440,14 +440,14 @@ class AgenticPipeline(BasePipeline):
                         batch, reward_metrics = compute_response_level_rewards(batch=batch, pipeline_config=self.pipeline_config)
                         metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
                         metrics.update(reward_metrics)
-                    metrics["time/step_cal_norm_rewards"] = timer.last
+                    metrics["timing.reward.normalize"] = timer.last
 
                     with Timer(name="cal_token_reward", logger=None) as timer:
                         # Expand compute_response_level_rewards and add kl_penalty.
                         # batch, kl_metrics = apply_kl_penalty(data=batch, kl_ctrl=self.kl_ctrl, kl_penalty=self.pipeline_config.kl_penalty)
                         batch, token_level_metrics = compute_token_reward(batch, self.pipeline_config, self.kl_ctrl)
                         metrics.update(token_level_metrics)
-                    metrics["time/step_cal_token_reward"] = timer.last
+                    metrics["timing.reward.token_level"] = timer.last
 
                     with Timer(name="compute_advantage", logger=None) as timer:
                         # Is the advantage calculated globally across the batch, or within each group?
@@ -462,7 +462,7 @@ class AgenticPipeline(BasePipeline):
                             pipeline_config=self.pipeline_config,
                         )
                         metrics.update(reduce_metrics(batch.meta_info.pop("metrics", {})))
-                    metrics["time/step_adv"] = timer.last
+                    metrics["timing.advantage"] = timer.last
 
                     if self.pipeline_config.enable_old_logprobs_recompute:
                         batch, corr_metrics = apply_train_infer_correction_to_batch(self.pipeline_config, batch,
@@ -501,15 +501,15 @@ class AgenticPipeline(BasePipeline):
                             critic_train_metrics = DataProto.materialize_concat(data_refs=critic_train_metrics_refs)
                             metrics.update(reduce_metrics(critic_train_metrics.meta_info.pop("metrics", {})))
                         tps_timer.push_units_processed(n=torch.sum(batch.batch["attention_mask"]).detach().item())
-                    metrics["time/step_train"] = train_timer.last
+                    metrics["timing.training"] = train_timer.last
 
                 with Timer(name="compute_data_metrics", logger=None) as data_metrics_timer:
                     data_metrics = compute_train_data_metrics(batch=batch)
 
-                metrics["time/step_compute_data_metrics"] = data_metrics_timer.last
+                metrics["timing.metrics_compute"] = data_metrics_timer.last
                 metrics.update(data_metrics)
-                metrics["system/tps"] = tps_timer.mean_throughput
-                metrics["system/samples"] = (global_step + 1) * self.pipeline_config.rollout_batch_size
+                metrics["throughput.tokens_per_second"] = tps_timer.mean_throughput
+                metrics["throughput.total_samples"] = (global_step + 1) * self.pipeline_config.rollout_batch_size
 
                 # do ckpt
                 self.state.step = global_step
@@ -563,9 +563,9 @@ class AgenticPipeline(BasePipeline):
                         logger.info(json.dumps(log_res, ensure_ascii=False))
                         logger.info(json.dumps(metrics, ensure_ascii=False))
 
-                metrics["time/step_log"] = log_timer.last
+                metrics["timing.logging"] = log_timer.last
 
-            metrics["time/step_total"] = step_timer.last
+            metrics["timing.step_total"] = step_timer.last
             self.tracker.log(values=metrics, step=global_step)
 
             logger.info(f"pipeline step {global_step} finished")
@@ -590,7 +590,7 @@ class AgenticPipeline(BasePipeline):
         eval_batch = ray.get(self.val_rollout_scheduler.get_batch.remote(batch, self.pipeline_config.val_batch_size))
 
         if "get_batch_return_start_time" in eval_batch.meta_info:
-            metrics["time/get_batch_cost_val"] = time.time() - eval_batch.meta_info.pop("get_batch_return_start_time")
+            metrics["timing.validation.get_batch"] = time.time() - eval_batch.meta_info.pop("get_batch_return_start_time")
 
         dump_rollout_trajectories(self.pipeline_config.rollout_dump_dir, global_step, eval_batch)
         eval_metrics = reduce_metrics(eval_batch.meta_info.get("metrics", {}))
@@ -650,8 +650,8 @@ class AgenticPipeline(BasePipeline):
                 mode = "copy"
 
         metrics = data.meta_info.get("metrics", {})
-        metrics["system/batch_add_count"] = 0
-        metrics["system/batch_remove_count"] = 0
+        metrics["batch.add_count"] = 0
+        metrics["batch.remove_count"] = 0
 
         # 防止删除所有样本导致空批次
         if mode == "delete" and threshold >= batch_size:
@@ -666,19 +666,19 @@ class AgenticPipeline(BasePipeline):
             tensor_data = data.batch[keep_mask_tensor]
             non_tensor_data = {key: val[keep_mask] for key, val in data.non_tensor_batch.items()}
             adjusted_batch = DataProto(batch=tensor_data, non_tensor_batch=non_tensor_data, meta_info=data.meta_info)
-            metrics["system/batch_remove_count"] = len(remove_indices)
+            metrics["batch.remove_count"] = len(remove_indices)
         elif mode == "copy":
             to_add = size_divide - threshold
             dup_indices = np.random.choice(batch_size, to_add, replace=True) if to_add > batch_size else np.random.choice(batch_size, to_add, replace=False)
             dup_proto = data.select_idxs(dup_indices)
             # TODO: set dup_proto response_mask to 0
             adjusted_batch = DataProto.concat([data, dup_proto])
-            metrics["system/batch_add_count"] = to_add
+            metrics["batch.add_count"] = to_add
         elif mode == "random_sample":
             select_indices = np.random.choice(batch_size, size_divide, replace=False)
             select_indices = np.sort(select_indices)
             adjusted_batch = data.select_idxs(select_indices)
-            metrics["system/batch_remove_count"] = batch_size - size_divide
+            metrics["batch.remove_count"] = batch_size - size_divide
         else:
             raise ValueError(f"Unsupported mode: {mode}")
 

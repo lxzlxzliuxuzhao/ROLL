@@ -455,7 +455,7 @@ class RLVRVLMPipeline(BasePipeline):
             metrics_mgr.clear_metrics()
             with tps_timer, Timer(name="step_total", logger=None) as step_total_timer:
                 logger.info(f"pre_step_total_time: {pre_step_total_time}")
-                metrics_mgr.add_metric("time/step_total", pre_step_total_time)
+                metrics_mgr.add_metric("timing.step_total", pre_step_total_time)
                 batch: DataProto = DataProto(
                     meta_info={
                         "global_step": global_step,
@@ -473,13 +473,13 @@ class RLVRVLMPipeline(BasePipeline):
                     if self.pipeline_config.async_pipeline:
                         ray.get([scheduler.pause_sampling.remote() for scheduler in self.generate_schedulers.values()])
                         self.actor_infer.offload_states(include=OffloadStateType.other_params)
-                metrics_mgr.add_metric("time/step_stop_server", step_stop_server_timer.last)
+                metrics_mgr.add_metric("timing.stop_server", step_stop_server_timer.last)
 
                 with Timer(name="step_model_update", logger=None) as step_model_update_timer:
                     model_update_metrics: Dict = self.model_update(global_step)
                     metrics_mgr.add_metrics(model_update_metrics)
                     batch.meta_info["generation_config"] = self.get_generation_config()
-                metrics_mgr.add_metric("time/step_model_update", step_model_update_timer.last)
+                metrics_mgr.add_metric("timing.weight_sync", step_model_update_timer.last)
 
                 self.actor_infer.load_states(blocking=True)
 
@@ -491,7 +491,7 @@ class RLVRVLMPipeline(BasePipeline):
                     with Timer(name="val_step", logger=None) as val_step_timer:
                         val_metrics = self.val(global_step=global_step)
                     metrics_mgr.add_metrics(val_metrics)
-                    metrics_mgr.add_metric("time/val_step", val_step_timer.last)
+                    metrics_mgr.add_metric("timing.validation", val_step_timer.last)
 
                 # 要按domain group by生成对应的batch
                 with actor_infer_timer, actor_infer_response_timer, Timer(
@@ -520,7 +520,7 @@ class RLVRVLMPipeline(BasePipeline):
                         for reward_cluster in self.rewards.values():
                             reward_cluster.offload_states()
                         self.actor_infer.offload_states()
-                metrics_mgr.add_metric("time/step_generate", step_generate_timer.last)
+                metrics_mgr.add_metric("timing.generate", step_generate_timer.last)
 
                 batch = generate_output
                 # mark here to make megatron get_data_input broadcast with non_batch_tensor
@@ -534,7 +534,7 @@ class RLVRVLMPipeline(BasePipeline):
                         metrics_mgr.add_reduced_metrics(ref_log_probs.meta_info.pop("metrics", {}))
                         ref_log_probs.rename(old_keys="log_probs", new_keys="ref_log_probs")
                         batch = batch.union(ref_log_probs)
-                metrics_mgr.add_metric("time/ref_log_probs_values", cal_ref_log_probs_timer.last)
+                metrics_mgr.add_metric("timing.reward.ref_logprob", cal_ref_log_probs_timer.last)
 
                 with Timer(name="cal_old_log_probs_values", logger=None) as cal_old_logpb_timer:
                     batch.meta_info["is_offload_states"] = False
@@ -565,7 +565,7 @@ class RLVRVLMPipeline(BasePipeline):
                     # Mock ref_log_probs using old_log_probs if reference is disabled
                     if not self.pipeline_config.enable_reference:
                         batch.batch["ref_log_probs"] = batch.batch["old_log_probs"].clone()
-                metrics_mgr.add_metric("time/old_log_probs", cal_old_logpb_timer.last)
+                metrics_mgr.add_metric("timing.policy_eval.logprob", cal_old_logpb_timer.last)
 
                 # group by domain to process reward
                 batch.batch["prompt_id"] = torch.arange(batch.batch.batch_size[0], device=batch.batch.device)
@@ -576,7 +576,7 @@ class RLVRVLMPipeline(BasePipeline):
                     with Timer(name="get_sample_level_mask", logger=None) as get_sample_level_mask_timer:
                         domain_batch, mask_metrics = get_sample_level_mask(domain_batch, self.pipeline_config)
                         metrics_mgr.add_domain_metrics(domain, mask_metrics)
-                    metrics_mgr.add_metric("time/get_sample_level_mask", get_sample_level_mask_timer.last)
+                    metrics_mgr.add_metric("timing.reward.response_mask", get_sample_level_mask_timer.last)
 
                     # 2. process reward
                     with Timer(name="reward_postprocess", logger=None) as reward_postprocess_timer:
@@ -584,7 +584,7 @@ class RLVRVLMPipeline(BasePipeline):
                             domain_batch, self.pipeline_config, self.running
                         )
                         metrics_mgr.add_domain_metrics(domain, response_level_metrics)
-                    metrics_mgr.add_domain_metrics(domain, {"time/reward_postprocess": reward_postprocess_timer.last})
+                    metrics_mgr.add_domain_metrics(domain, {"timing.reward.normalize": reward_postprocess_timer.last})
 
                     # 3. compute token level rewards
                     with Timer(name="get_token_reward", logger=None) as get_token_reward_timer:
@@ -592,7 +592,7 @@ class RLVRVLMPipeline(BasePipeline):
                             domain_batch, self.pipeline_config, self.kl_ctrl
                         )
                         metrics_mgr.add_domain_metrics(domain, token_level_metrics)
-                    metrics_mgr.add_domain_metrics(domain, {"time/get_token_reward": get_token_reward_timer.last})
+                    metrics_mgr.add_domain_metrics(domain, {"timing.reward.token_level": get_token_reward_timer.last})
 
                     # 4. compute advantage
                     final_response_mask = domain_batch.batch["final_response_mask"].clone()
@@ -611,7 +611,7 @@ class RLVRVLMPipeline(BasePipeline):
                         domain_metrics = reduce_metrics(domain_batch.meta_info.pop("metrics", {}))
                         metrics_mgr.add_domain_metrics(domain, domain_metrics)
                         batch_list.append(domain_batch)
-                    metrics_mgr.add_domain_metrics(domain, {"time/compute_advantage": compute_advantage_timer.last})
+                    metrics_mgr.add_domain_metrics(domain, {"timing.advantage": compute_advantage_timer.last})
 
                 batch = DataProto.concat(batch_list)
 
@@ -665,7 +665,7 @@ class RLVRVLMPipeline(BasePipeline):
                         critic_train_metrics = DataProto.materialize_concat(data_refs=critic_train_metrics_refs)
                         metrics_mgr.add_reduced_metrics(critic_train_metrics.meta_info.pop("metrics", {}))
 
-                metrics_mgr.add_metric("time/step_train", step_train_timer.last)
+                metrics_mgr.add_metric("timing.training", step_train_timer.last)
 
                 tps_timer.push_units_processed(n=torch.sum(batch.batch["attention_mask"]).detach().item())
                 actor_infer_timer.push_units_processed(n=torch.sum(batch.batch["attention_mask"]).detach().item())
@@ -727,7 +727,7 @@ class RLVRVLMPipeline(BasePipeline):
                 timeout=self.pipeline_config.rpc_timeout,
             )
             generate_output.meta_info.pop("is_offload_states", None)
-            val_metrics_mgr.add_metric("time/step_generate", step_generate_timer.last)
+            val_metrics_mgr.add_metric("timing.generate", step_generate_timer.last)
 
         batch = generate_output
         val_score_mean = batch.batch["scores"].detach().float().mean().item()

@@ -97,8 +97,8 @@ class GeneratePipeline(BasePipeline):
             for prompt, response in zip(prompts, responses):
                 generate_res.append({"prompt": prompt, "response": response})
 
-            metrics["system/tps"] = tps_timer.mean_throughput
-            metrics["time/generate"] = generate_timer.last
+            metrics["throughput.tokens_per_second"] = tps_timer.mean_throughput
+            metrics["timing.generate"] = generate_timer.last
             metrics["generate_res"] = generate_res
 
             metric_list.append(metrics)
@@ -226,8 +226,8 @@ class GenerateCmpPipeline(BasePipeline):
                     }
                 )
 
-            metrics["system/tps"] = tps_timer.mean_throughput
-            metrics["time/generate"] = generate_timer.last
+            metrics["throughput.tokens_per_second"] = tps_timer.mean_throughput
+            metrics["timing.generate"] = generate_timer.last
             metrics["generate_res"] = generate_res
 
             metric_list.append(metrics)

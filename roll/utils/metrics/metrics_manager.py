@@ -54,31 +54,31 @@ class MetricsManager:
     def add_system_metrics(
         self, global_step: int, batch_size: int, resource_manager=None, actor_infer=None, actor_train=None
     ) -> None:
-        self.metrics["system/global_step"] = global_step
-        self.metrics["system/batch_size"] = batch_size
-        self.metrics["system/samples"] = (global_step + 1) * batch_size
+        self.metrics["throughput.global_step"] = global_step
+        self.metrics["throughput.batch_size"] = batch_size
+        self.metrics["throughput.total_samples"] = (global_step + 1) * batch_size
         for name, timer in self.timers.items():
             if hasattr(timer, "mean_throughput"):
-                self.metrics[f"system/{name}/tps"] = timer.mean_throughput
+                self.metrics[f"throughput/{name}/tps"] = timer.mean_throughput
                 if hasattr(timer, "mean"):
-                    self.metrics[f"system/time/{name}_mean"] = timer.mean
+                    self.metrics[f"throughput/time/{name}_mean"] = timer.mean
 
                 if resource_manager and name == "tps":
-                    self.metrics["system/tps_gpu"] = timer.mean_throughput / resource_manager.num_gpus
+                    self.metrics["throughput/tps_gpu"] = timer.mean_throughput / resource_manager.num_gpus
 
                 if actor_infer and name == "actor_infer":
-                    self.metrics["system/actor_infer/tps_gpu"] = timer.mean_throughput / actor_infer.world_size
-                    self.metrics["system/actor_infer/tps_dp"] = timer.mean_throughput / actor_infer.dp_size
+                    self.metrics["throughput/actor_infer/tps_gpu"] = timer.mean_throughput / actor_infer.world_size
+                    self.metrics["throughput/actor_infer/tps_dp"] = timer.mean_throughput / actor_infer.dp_size
 
                 if actor_infer and name == "actor_infer_response":
-                    self.metrics["system/actor_infer/response/tps_gpu"] = (
+                    self.metrics["throughput/actor_infer/response/tps_gpu"] = (
                         timer.mean_throughput / actor_infer.world_size
                     )
-                    self.metrics["system/actor_infer/response/tps_dp"] = timer.mean_throughput / actor_infer.dp_size
+                    self.metrics["throughput/actor_infer/response/tps_dp"] = timer.mean_throughput / actor_infer.dp_size
 
                 if actor_train and name == "actor_train":
-                    self.metrics["system/actor_train/tps_gpu"] = timer.mean_throughput / actor_train.world_size
-                    self.metrics["system/actor_train/tps_dp"] = timer.mean_throughput / actor_train.dp_size
+                    self.metrics["throughput/actor_train/tps_gpu"] = timer.mean_throughput / actor_train.world_size
+                    self.metrics["throughput/actor_train/tps_dp"] = timer.mean_throughput / actor_train.dp_size
 
     def add_timer_metrics(self, timer_dict: Dict[str, Timer]) -> None:
         for name, timer in timer_dict.items():
