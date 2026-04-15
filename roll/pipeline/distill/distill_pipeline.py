@@ -281,7 +281,7 @@ class DistillPipeline(BasePipeline):
                     with Timer(name="val") as val_timer:
                         val_metrics = self.val()
                         metrics_mgr.add_reduced_metrics(val_metrics)
-                    metrics_mgr.add_metric("time/val", val_timer.last)
+                    metrics_mgr.add_metric("timing.validation", val_timer.last)
 
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
                 batch.meta_info = {"global_step": global_step, "is_offload_states": self.pipeline_config.is_offload_states, "is_offload_optimizer_states_in_train_step": self.pipeline_config.is_offload_optimizer_states_in_train_step,

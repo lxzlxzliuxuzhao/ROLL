@@ -203,7 +203,7 @@ class SFTPipeline(BasePipeline):
                     with Timer(name="val") as val_timer:
                         val_metrics = self.val()
                         metrics_mgr.add_reduced_metrics(val_metrics)
-                    metrics_mgr.add_metric("time/val", val_timer.last)
+                    metrics_mgr.add_metric("timing.validation", val_timer.last)
 
                 with Timer(name="step_train", logger=None) as step_train_timer:
                     batch: DataProto = DataProto.from_single_dict(batch_dict)
@@ -218,7 +218,7 @@ class SFTPipeline(BasePipeline):
                     train_metrics = DataProto.materialize_concat(data_refs=train_metrics_refs)
                     train_metrics = train_metrics.meta_info.pop("metrics", {})
                     metrics_mgr.add_reduced_metrics(train_metrics)
-                metrics_mgr.add_metric("time/step_train", step_train_timer.last)
+                metrics_mgr.add_metric("timing.training", step_train_timer.last)
 
                 metrics = metrics_mgr.get_metrics()
                 metrics = {k: float(v) for k, v in metrics.items()}

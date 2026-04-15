@@ -137,7 +137,7 @@ class RLVRRolloutPipeline(RLVRPipeline):
             for reward_cluster in self.rewards.values():
                 reward_cluster.offload_states()
             generate_output.meta_info.pop("is_offload_states", None)
-        val_metrics_mgr.add_metric("time/step_generate", step_generate_timer.last)
+        val_metrics_mgr.add_metric("timing.generate", step_generate_timer.last)
 
         batch = generate_output
         val_correct_mean = (batch.batch["scores"] == 1).detach().float().mean().item()

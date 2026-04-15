@@ -73,11 +73,11 @@ class AgenticRolloutPipeline(BasePipeline):
                     break
 
                 if "get_batch_return_start_time" in batch.meta_info:
-                    metrics["time/get_batch_cost_train"] = time.time() - batch.meta_info.pop("get_batch_return_start_time")
+                    metrics["timing.rollout.get_batch"] = time.time() - batch.meta_info.pop("get_batch_return_start_time")
                 actor_infer_metrics: DataProto = self.actor_infer.get_metrics()
                 metrics.update(reduce_metrics(actor_infer_metrics.meta_info.pop("metrics", {})))
 
-            metrics["time/step_rollout"] = rollout_timer.last
+            metrics["timing.rollout"] = rollout_timer.last
             eval_metrics = reduce_metrics(batch.meta_info.get("metrics", {}))
             eval_score = get_episode_scores(batch)
             eval_metrics["score/mean"] = torch.mean(eval_score).detach().item()
@@ -95,7 +95,7 @@ class AgenticRolloutPipeline(BasePipeline):
 
             metrics.update({f"val/{k}": v for k, v in eval_metrics.items()})
             batch.meta_info["global_step"] = global_step
-            metrics["system/samples"] = (global_step + 1) * batch.batch.shape[0]
+            metrics["throughput.total_samples"] = (global_step + 1) * batch.batch.shape[0]
 
             self.tracker.log(values=metrics, step=global_step)
 

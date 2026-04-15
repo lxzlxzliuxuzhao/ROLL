@@ -92,9 +92,9 @@ class RewardFLPipeline(BasePipeline):
                         actor_train_refs: DataProto = DataProto.materialize_concat(data_refs=actor_train_refs)
                         metrics_mgr.add_reduced_metrics(actor_train_refs.meta_info.pop("metrics", {}))
 
-                        metrics_mgr.add_metric("time/actor_train", actor_train_timer.last)
+                        metrics_mgr.add_metric("timing.training", actor_train_timer.last)
 
-                    metrics_mgr.add_metric("time/step_total", step_total_timer.last)
+                    metrics_mgr.add_metric("timing.step_total", step_total_timer.last)
 
                 metrics = metrics_mgr.get_metrics()
                 

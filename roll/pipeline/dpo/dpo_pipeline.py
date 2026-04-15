@@ -214,7 +214,7 @@ class DPOPipeline(BasePipeline):
                     with Timer(name="val_step", logger=None) as val_step_timer:
                         val_metrics = self.val()
                         metrics_mgr.add_reduced_metrics(val_metrics)
-                    metrics_mgr.add_metric("time/val_step", val_step_timer.last)
+                    metrics_mgr.add_metric("timing.validation", val_step_timer.last)
 
                 with Timer(name="step_total", logger=None) as step_total_timer:
                     batch_dict: Dict
@@ -227,14 +227,14 @@ class DPOPipeline(BasePipeline):
                         metrics_mgr.add_reduced_metrics(ref_log_probs.meta_info.pop("metrics", {}))
                         ref_log_probs.rename(old_keys="log_probs", new_keys="reference_log_probs")
                         batch = batch.union(ref_log_probs)
-                    metrics_mgr.add_metric("time/cal_ref_log_probs", cal_ref_log_probs_timer.last)
+                    metrics_mgr.add_metric("timing.reward.ref_logprob", cal_ref_log_probs_timer.last)
 
                     with Timer(name="actor_train", logger=None) as actor_train_timer:
                         actor_train_refs = self.actor_train.train_step(batch, blocking=False)
                         actor_train_refs: DataProto = DataProto.materialize_concat(data_refs=actor_train_refs)
                         metrics_mgr.add_reduced_metrics(actor_train_refs.meta_info.pop("metrics", {}))
-                    metrics_mgr.add_metric("time/actor_train", actor_train_timer.last)
-                metrics_mgr.add_metric("time/step_total", step_total_timer.last)
+                    metrics_mgr.add_metric("timing.training", actor_train_timer.last)
+                metrics_mgr.add_metric("timing.step_total", step_total_timer.last)
 
                 metrics = metrics_mgr.get_metrics()
                 metrics = {k: float(v) for k, v in metrics.items()}
@@ -277,13 +277,13 @@ class DPOPipeline(BasePipeline):
                 metrics.update(ref_log_probs.meta_info.pop("metrics", {}))
                 ref_log_probs.rename(old_keys="log_probs", new_keys="reference_log_probs")
                 batch = batch.union(ref_log_probs)
-            metrics["time/cal_ref_log_probs"] = cal_ref_log_probs_timer.last
+            metrics["timing.reward.ref_logprob"] = cal_ref_log_probs_timer.last
 
             with Timer(name="cal_log_probs", logger=None) as cal_log_probs_timer:
                 log_probs = self.actor_train.compute_log_probs(batch, blocking=True)
                 metrics.update(log_probs.meta_info.pop("metrics", {}))
                 batch = batch.union(log_probs)
-            metrics["time/cal_log_probs"] = cal_log_probs_timer.last
+            metrics["timing.policy_eval.logprob"] = cal_log_probs_timer.last
 
             reference_chosen_logps, reference_rejected_logps = get_logps(
                 batch.batch["reference_log_probs"], batch.batch["attention_mask"], batch.batch["prompt_id_lens"]
