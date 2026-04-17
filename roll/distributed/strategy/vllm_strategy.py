@@ -2,6 +2,7 @@ import asyncio
 import copy
 import gc
 import os
+import time
 from collections import deque
 from typing import Dict, List, Optional
 from packaging.version import Version
@@ -29,9 +30,154 @@ from roll.utils.functionals import (
 from roll.utils.logging import get_logger
 from roll.utils.offload_states import OffloadStateType
 from roll.platforms import current_platform
+from roll.utils.tracing.core import get_trace_manager
 
 
 logger = get_logger()
+
+
+_VLLM_GAUGE_METRIC_SPECS = {
+    "vllm:num_requests_waiting": {
+        "snapshot_key": "vllm/num_requests_waiting_max",
+        "sample_name": "vllm.num_requests_waiting",
+        "unit": "req",
+    },
+    "vllm:num_requests_running": {
+        "snapshot_key": "vllm/num_requests_running_max",
+        "sample_name": "vllm.num_requests_running",
+        "unit": "req",
+    },
+}
+
+_VLLM_COUNTER_METRIC_SPECS = {
+    "vllm:num_preemptions": {
+        "snapshot_key": "vllm/num_preemptions_delta@sum",
+        "sample_name": "vllm.num_preemptions_delta",
+        "unit": "count",
+    },
+    "vllm:prefix_cache_queries": {
+        "snapshot_key": "vllm/prefix_cache_queries_delta@sum",
+        "sample_name": "vllm.prefix_cache_queries_delta",
+        "unit": "tok",
+    },
+    "vllm:prefix_cache_hits": {
+        "snapshot_key": "vllm/prefix_cache_hits_delta@sum",
+        "sample_name": "vllm.prefix_cache_hits_delta",
+        "unit": "tok",
+    },
+}
+
+_VLLM_REALTIME_SAMPLE_SPECS = {
+    "kv_cache_usage_perc": {
+        "snapshot_key": "vllm/kv_cache_usage_perc_max",
+        "sample_name": "vllm.kv_cache_usage_pct",
+        "unit": "%",
+    },
+    "num_gpu_blocks_total": {
+        "snapshot_key": "vllm/kv_blocks_total_max",
+        "sample_name": "vllm.kv_blocks_total",
+        "unit": "blocks",
+    },
+    "num_gpu_blocks_used": {
+        "snapshot_key": "vllm/kv_blocks_used_max",
+        "sample_name": "vllm.kv_blocks_used",
+        "unit": "blocks",
+    },
+    "num_gpu_blocks_free": {
+        "snapshot_key": "vllm/kv_blocks_free_min",
+        "sample_name": "vllm.kv_blocks_free",
+        "unit": "blocks",
+    },
+    "cached_block_entries": {
+        "snapshot_key": "vllm/kv_cached_entries_max",
+        "sample_name": "vllm.kv_cached_entries",
+        "unit": "entries",
+    },
+    "cached_block_count": {
+        "snapshot_key": "vllm/kv_cached_blocks_max",
+        "sample_name": "vllm.kv_cached_blocks",
+        "unit": "blocks",
+    },
+    "free_cached_block_count": {
+        "snapshot_key": "vllm/kv_blocks_free_cached_max",
+        "sample_name": "vllm.kv_blocks_free_cached",
+        "unit": "blocks",
+    },
+    "free_uncached_block_count": {
+        "snapshot_key": "vllm/kv_blocks_free_uncached_min",
+        "sample_name": "vllm.kv_blocks_free_uncached",
+        "unit": "blocks",
+    },
+    "kv_cache_total_bytes": {
+        "snapshot_key": "vllm/kv_cache_total_bytes_max",
+        "sample_name": "vllm.kv_cache_total_bytes",
+        "unit": "bytes",
+    },
+    "kv_cache_used_bytes": {
+        "snapshot_key": "vllm/kv_cache_used_bytes_max",
+        "sample_name": "vllm.kv_cache_used_bytes",
+        "unit": "bytes",
+    },
+    "kv_cache_free_bytes": {
+        "snapshot_key": "vllm/kv_cache_free_bytes_min",
+        "sample_name": "vllm.kv_cache_free_bytes",
+        "unit": "bytes",
+    },
+    "num_requests_running": {
+        "snapshot_key": "vllm/num_requests_running_max",
+        "sample_name": "vllm.num_requests_running",
+        "unit": "req",
+    },
+    "num_requests_waiting": {
+        "snapshot_key": "vllm/num_requests_waiting_max",
+        "sample_name": "vllm.num_requests_waiting",
+        "unit": "req",
+    },
+    "num_preemptions_delta": {
+        "snapshot_key": "vllm/num_preemptions_delta@sum",
+        "sample_name": "vllm.num_preemptions_delta",
+        "unit": "count",
+    },
+    "prefix_cache_queries_delta": {
+        "snapshot_key": "vllm/prefix_cache_queries_delta@sum",
+        "sample_name": "vllm.prefix_cache_queries_delta",
+        "unit": "tok",
+    },
+    "prefix_cache_hits_delta": {
+        "snapshot_key": "vllm/prefix_cache_hits_delta@sum",
+        "sample_name": "vllm.prefix_cache_hits_delta",
+        "unit": "tok",
+    },
+    "stored_block_count_delta": {
+        "snapshot_key": "vllm/kv_event_stored_blocks@sum",
+        "sample_name": "vllm.kv_event_stored_blocks_delta",
+        "unit": "blocks",
+    },
+    "removed_block_count_delta": {
+        "snapshot_key": "vllm/kv_event_removed_blocks@sum",
+        "sample_name": "vllm.kv_event_removed_blocks_delta",
+        "unit": "blocks",
+    },
+    "cleared_event_count_delta": {
+        "snapshot_key": "vllm/kv_event_clears@sum",
+        "sample_name": "vllm.kv_event_clears_delta",
+        "unit": "count",
+    },
+}
+
+
+def _metric_identity(metric) -> tuple[str, tuple[tuple[str, str], ...]]:
+    return metric.name, tuple(sorted((metric.labels or {}).items()))
+
+
+def _metric_sample_attrs(metric) -> dict:
+    labels = dict(metric.labels or {})
+    return {key: value for key, value in labels.items() if value not in (None, "")}
+
+
+def _sample_metric_value(metric_name: str, raw_value: float) -> float:
+    value = float(raw_value)
+    return value
 
 
 class VllmStrategy(InferenceStrategy):
@@ -44,6 +190,9 @@ class VllmStrategy(InferenceStrategy):
         self._metrics_snapshots = deque(maxlen=3600)
         self._metrics_snapshot_interval = 1.0  # Snapshot every 1 second
         self._metrics_task = None
+        self._active_trace_steps: dict[int, int] = {}
+        self._counter_last_values: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
+        self._kv_snapshot_warning_emitted = False
 
     async def initialize(self, model_provider):
         set_seed(seed=self.worker.pipeline_config.seed)
@@ -136,6 +285,58 @@ class VllmStrategy(InferenceStrategy):
         vllm实现compute log probs在这里实现即可
         """
         pass
+
+    @staticmethod
+    def _extract_phase_timing(output: Optional[RequestOutput]) -> Optional[Dict]:
+        if output is None:
+            return None
+        phase_timing = getattr(output, "roll_phase_timing", None)
+        return dict(phase_timing) if isinstance(phase_timing, dict) else None
+
+    def _activate_trace_step(self, step: Optional[int]) -> Optional[int]:
+        if step is None:
+            return None
+        step = int(step)
+        self._active_trace_steps[step] = self._active_trace_steps.get(step, 0) + 1
+        return step
+
+    def _deactivate_trace_step(self, step: Optional[int]) -> None:
+        if step is None:
+            return
+        remaining = self._active_trace_steps.get(step, 0) - 1
+        if remaining > 0:
+            self._active_trace_steps[step] = remaining
+            return
+        self._active_trace_steps.pop(step, None)
+
+    @staticmethod
+    def _normalize_engine_snapshots(raw_snapshot) -> list[dict]:
+        if raw_snapshot is None:
+            return []
+        if isinstance(raw_snapshot, dict):
+            return [raw_snapshot]
+        if isinstance(raw_snapshot, (list, tuple)):
+            return [item for item in raw_snapshot if isinstance(item, dict)]
+        return []
+
+    async def _collect_engine_core_kv_snapshots(self) -> list[dict]:
+        if not hasattr(self.model, "call_engine_core_utility"):
+            return []
+        try:
+            raw_snapshot = await self.model.call_engine_core_utility("roll_get_kv_cache_snapshot")
+        except Exception as exc:
+            if not self._kv_snapshot_warning_emitted:
+                logger.warning(f"Failed to query real vLLM KV cache snapshot: {exc}")
+                self._kv_snapshot_warning_emitted = True
+            return []
+        snapshots = []
+        for engine_index, snapshot in enumerate(self._normalize_engine_snapshots(raw_snapshot)):
+            if not snapshot.get("available", False):
+                continue
+            snapshot = dict(snapshot)
+            snapshot["engine"] = str(snapshot.get("engine", engine_index))
+            snapshots.append(snapshot)
+        return snapshots
 
     async def generate(self, batch: DataProto, generation_config) -> torch.Tensor:
         # Check if beam search is requested
@@ -276,24 +477,29 @@ class VllmStrategy(InferenceStrategy):
                 lora_int_id = lora_int_ids[0]
                 lora_request = LoRARequest(lora_name=f"{lora_int_id}", lora_int_id=lora_int_id, lora_path="dummy_lora_path")
 
-        result_generator = self.model.generate(
-            prompt=prompt,
-            sampling_params=SamplingParams(**payload["sampling_params"]),
-            request_id=payload["rid"],
-            lora_request=lora_request,
-        )
-        output: Optional[RequestOutput] = None
-        # vLLM support partial rollout in v1 from 0.10.1, and will return finished output
-        # with finish_reason setted no matter what RequestOutputKind is.
-        # For compatibility, the following except block are only for v0 and older version of v1.
+        trace_step = self._activate_trace_step(payload.get("trace_step"))
         try:
-            async for result in result_generator:
-                output = result
-        except asyncio.CancelledError:
-            if output is None:
-                return {"finish_reasons": ["abort"]}
+            result_generator = self.model.generate(
+                prompt=prompt,
+                sampling_params=SamplingParams(**payload["sampling_params"]),
+                request_id=payload["rid"],
+                lora_request=lora_request,
+            )
+            output: Optional[RequestOutput] = None
+            # vLLM support partial rollout in v1 from 0.10.1, and will return finished output
+            # with finish_reason setted no matter what RequestOutputKind is.
+            # For compatibility, the following except block are only for v0 and older version of v1.
+            try:
+                async for result in result_generator:
+                    output = result
+            except asyncio.CancelledError:
+                if output is None:
+                    return {"finish_reasons": ["abort"]}
+        finally:
+            self._deactivate_trace_step(trace_step)
 
         output_token_ids, finish_reasons, logprobs = [], [], []
+        phase_timing = self._extract_phase_timing(output)
         for completion_output in output.outputs:
             output_token_ids.append(completion_output.token_ids)
             # For compatibility, older version may return unfinished result, set finish_reason of those to 'abort'.
@@ -310,6 +516,7 @@ class VllmStrategy(InferenceStrategy):
             "output_token_ids": output_token_ids,
             "finish_reasons": finish_reasons,
             "output_logprobs": logprobs,
+            "vllm_phase_timing": phase_timing,
         }
 
     async def abort_requests(self, request_ids):
@@ -356,18 +563,81 @@ class VllmStrategy(InferenceStrategy):
         from vllm.v1.metrics.reader import get_metrics_snapshot
         while True:
             raw_metrics = get_metrics_snapshot()
-            snapshot = {
-                'vllm/kv_cache_usage_perc_max': [],
-                'vllm/num_requests_waiting_max': [],
-                'vllm/num_preemptions_max': []
-            }
+            engine_snapshots = await self._collect_engine_core_kv_snapshots()
+            snapshot = {}
+            timestamp_ns = time.time_ns()
+            active_trace_steps = tuple(self._active_trace_steps.keys())
+            tracer = get_trace_manager(component=f"{self.worker.worker_name}_metrics")
+            have_real_engine_snapshot = bool(engine_snapshots)
+            for engine_snapshot in engine_snapshots:
+                attrs = {
+                    "engine": engine_snapshot.get("engine"),
+                    "source": "engine_core",
+                }
+                for field_name, spec in _VLLM_REALTIME_SAMPLE_SPECS.items():
+                    if field_name in {"stored_block_count_delta", "removed_block_count_delta", "cleared_event_count_delta"}:
+                        value = float((engine_snapshot.get("kv_events") or {}).get(field_name, 0.0))
+                    else:
+                        if field_name not in engine_snapshot:
+                            continue
+                        value = float(engine_snapshot[field_name])
+                    snapshot.setdefault(spec["snapshot_key"], []).append(value)
+                    if active_trace_steps:
+                        for step in active_trace_steps:
+                            tracer.record_sample(
+                                spec["sample_name"],
+                                value,
+                                unit=spec["unit"],
+                                step=step,
+                                timestamp_ns=timestamp_ns,
+                                attrs=attrs,
+                            )
             for metric in raw_metrics:
-                if metric.name == "vllm:kv_cache_usage_perc":
-                    snapshot['vllm/kv_cache_usage_perc_max'].append(metric.value)
-                elif metric.name == "vllm:num_requests_waiting":
-                    snapshot['vllm/num_requests_waiting_max'].append(metric.value)
-                elif metric.name == "vllm:num_preemptions":
-                    snapshot['vllm/num_preemptions_max'].append(metric.value)
+                if have_real_engine_snapshot and metric.name in (
+                    "vllm:num_requests_waiting",
+                    "vllm:num_requests_running",
+                    "vllm:num_preemptions",
+                    "vllm:prefix_cache_queries",
+                    "vllm:prefix_cache_hits",
+                ):
+                    continue
+                if metric.name in _VLLM_GAUGE_METRIC_SPECS:
+                    spec = _VLLM_GAUGE_METRIC_SPECS[metric.name]
+                    sample_value = _sample_metric_value(metric.name, metric.value)
+                    snapshot.setdefault(spec["snapshot_key"], []).append(sample_value)
+                    if active_trace_steps:
+                        attrs = _metric_sample_attrs(metric)
+                        for step in active_trace_steps:
+                            tracer.record_sample(
+                                spec["sample_name"],
+                                sample_value,
+                                unit=spec["unit"],
+                                step=step,
+                                timestamp_ns=timestamp_ns,
+                                attrs=attrs,
+                            )
+                    continue
+
+                if metric.name in _VLLM_COUNTER_METRIC_SPECS:
+                    spec = _VLLM_COUNTER_METRIC_SPECS[metric.name]
+                    identity = _metric_identity(metric)
+                    current_value = float(metric.value)
+                    previous_value = self._counter_last_values.get(identity)
+                    delta_value = 0.0 if previous_value is None else max(current_value - previous_value, 0.0)
+                    self._counter_last_values[identity] = current_value
+                    snapshot.setdefault(spec["snapshot_key"], []).append(delta_value)
+                    if active_trace_steps:
+                        attrs = _metric_sample_attrs(metric)
+                        for step in active_trace_steps:
+                            tracer.record_sample(
+                                spec["sample_name"],
+                                delta_value,
+                                unit=spec["unit"],
+                                kind="counter",
+                                step=step,
+                                timestamp_ns=timestamp_ns,
+                                attrs=attrs,
+                            )
             self._metrics_snapshots.append(snapshot)
 
             await asyncio.sleep(self._metrics_snapshot_interval)

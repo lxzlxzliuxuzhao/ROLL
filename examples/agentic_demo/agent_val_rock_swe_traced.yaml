@@ -31,6 +31,8 @@ tracing:
   export_html: true
   export_step_interval: 1
 
+pipeline_cls: roll.pipeline.agentic.traced_agentic_pipeline.TracedAgenticPipeline
+
 num_gpus_per_node: 8
 rpc_timeout: 72000
 
@@ -44,9 +46,9 @@ resume_from_checkpoint: false
 
 rollout_batch_size: 16
 val_batch_size: 1
-sequence_length: 32768
+sequence_length: 65536
 
-max_tokens_per_step: 2048
+max_tokens_per_step: 8192
 
 advantage_clip: 0.2
 ppo_epochs: 1
@@ -113,6 +115,13 @@ actor_infer:
       block_size: 16
       load_format: auto
       tensor_parallel_size: 2
+      enable_prefix_caching: true
+      lmcache_config:
+        chunk_size: 256
+        local_cpu: true
+        max_local_cpu_size: 200.0
+        use_layerwise: false
+        enable_async_loading: false
   device_mapping: list(range(0,2))
 
 reference:
@@ -162,7 +171,7 @@ val_env_manager:
 
 
 max_actions_per_traj: 60
-env_manager_cls: roll.pipeline.agentic.env_manager.agent_native_env_manager.AgentNativeStepEnvManager
+env_manager_cls: roll.pipeline.agentic.env_manager.traced_agent_native_env_manager.TracedAgentNativeStepEnvManager
 
 agent_config_common:
   agent_type: "default"
@@ -193,7 +202,7 @@ agent_config_common:
     IFLOW_searchApiKey: "88888888"
     IFLOW_selectedAuthType: "openai-compatible"
     IFLOW_disableAutoUpdate: "true"
-    IFLOW_tokensLimit: "128000"
+    IFLOW_tokensLimit: "131073"
     IFLOW_shellTimeout: "360000"
     IFLOW_coreTools: "Edit,exit_plan_mode,glob,list_directory,multi_edit,plan,read plan,read_file,read_many_files,save_memory,Search,Shell,task,web_fetch,web_search,write_file,xml_escape"
 
@@ -207,14 +216,14 @@ custom_envs:
     agent_system_template: "agent_system_template placeholder"
     agent_template: "agent_template placeholder"
     env_config:
-      dataset_name: /ROLL/data/swe_bench_verified_example.jsonl
+      dataset_name: /home/lxz/ROLL/data/swe_bench_verified_example.jsonl
       tools: ~
       max_steps: ${max_actions_per_traj}
       mode: "train"
-      sandbox_base_url: http://localhost:8080 # change to your own service address if needed
+      sandbox_base_url: http://10.212.70.196:8080 # change to your own service address if needed
       user_id: "xxx"
       experiment_id: "test_tb_native"
-      test_files: ["/terminal-bench-datasets/datasets/swebench-verified"]
+      test_files: ["/raid/lxz/terminal-bench-datasets/datasets/swebench-verified"]
       agent_config: ${agent_config_common}
   swebench_native_verified:
     env_type: "rock_tb_native_env"
@@ -224,12 +233,12 @@ custom_envs:
     agent_system_template: "agent_system_template placeholder"
     agent_template: "agent_template placeholder"
     env_config:
-      dataset_name: /ROLL/data/swe_bench_verified_example.jsonl
+      dataset_name: /home/lxz/ROLL/data/swe_bench_verified_example.jsonl
       tools: ~
       max_steps: ${max_actions_per_traj}
       mode: "val"
-      sandbox_base_url: http://localhost:8080 # change to your own service address if needed
+      sandbox_base_url: http://10.212.70.196:8080 # change to your own service address if needed
       user_id: "xxx"
       experiment_id: "test_tb_native"
-      test_files: ["/terminal-bench-datasets/datasets/swebench-verified"]
+      test_files: ["/raid/lxz/terminal-bench-datasets/datasets/swebench-verified"]
       agent_config: ${agent_config_common}

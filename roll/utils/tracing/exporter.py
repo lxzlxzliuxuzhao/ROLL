@@ -36,6 +36,142 @@ _STAGE_GROUP_LABELS = {
     "Diagnostics": "诊断",
 }
 
+_METRIC_SERIES_SPECS = {
+    "vllm.kv_cache_usage_pct": {
+        "series_id": "vllm_kv_cache_usage_pct",
+        "series_label": "KV Cache 使用率",
+        "series_group": "KV Cache",
+        "description": "vLLM engine-core 里 block pool 的实时使用率。这里展示的是 step 内真实的 KV block 占用，不是 gpu_memory_utilization 预留上限。",
+        "render": "step",
+    },
+    "vllm.kv_blocks_total": {
+        "series_id": "vllm_kv_blocks_total",
+        "series_label": "KV 可用 Block 总数",
+        "series_group": "KV Cache",
+        "description": "当前 engine 的可用 KV block 总容量，直接读取 block pool。",
+        "render": "step",
+    },
+    "vllm.kv_blocks_used": {
+        "series_id": "vllm_kv_blocks_used",
+        "series_label": "Active Blocks",
+        "series_group": "KV Cache",
+        "description": "当前 ref_cnt>0、仍被活跃请求持有的 block 数。它对应活跃占用，不等于“所有 cached blocks”。",
+        "render": "step",
+    },
+    "vllm.kv_blocks_free": {
+        "series_id": "vllm_kv_blocks_free",
+        "series_label": "KV 空闲 Block",
+        "series_group": "KV Cache",
+        "description": "当前已经回到 free queue 的 block 总数，包含 free cached blocks 和 free uncached blocks。",
+        "render": "step",
+    },
+    "vllm.kv_cached_entries": {
+        "series_id": "vllm_kv_cached_entries",
+        "series_label": "Prefix Cache 条目数",
+        "series_group": "KV Cache",
+        "description": "cached_block_hash_to_block 里的 hash 条目数，反映 prefix cache 当前索引规模。",
+        "render": "step",
+    },
+    "vllm.kv_cached_blocks": {
+        "series_id": "vllm_kv_cached_blocks",
+        "series_label": "Cached Blocks",
+        "series_group": "KV Cache",
+        "description": "当前仍带 hash、挂在 prefix cache 索引上的 block 总数。它包含活跃 cached blocks，也包含已经回到 free queue 的 cached blocks，所以与 Active Blocks 有重叠。",
+        "render": "step",
+    },
+    "vllm.kv_blocks_free_cached": {
+        "series_id": "vllm_kv_blocks_free_cached",
+        "series_label": "Evictable Cached Blocks",
+        "series_group": "KV Cache",
+        "description": "当前 ref_cnt=0 且仍带 hash 的 cached blocks。它们已经不被活跃请求占用，可以直接复用，也是后续分配时最可能被驱逐的对象。",
+        "render": "step",
+    },
+    "vllm.kv_blocks_free_uncached": {
+        "series_id": "vllm_kv_blocks_free_uncached",
+        "series_label": "Cold Free Blocks",
+        "series_group": "KV Cache",
+        "description": "当前 ref_cnt=0 且没有 hash 的空闲 blocks。只要这条线还很高，allocator 往往会先消耗这些冷 block，而不会去驱逐 cached blocks。",
+        "render": "step",
+    },
+    "vllm.kv_cache_total_bytes": {
+        "series_id": "vllm_kv_cache_total_bytes",
+        "series_label": "KV 总容量",
+        "series_group": "KV Cache",
+        "description": "按照 bytes_per_block 乘 block 总数得到的 KV 实际总容量。",
+        "render": "step",
+    },
+    "vllm.kv_cache_used_bytes": {
+        "series_id": "vllm_kv_cache_used_bytes",
+        "series_label": "KV 已用容量",
+        "series_group": "KV Cache",
+        "description": "按照已用 block 数计算的 KV 实际占用容量。",
+        "render": "step",
+    },
+    "vllm.kv_cache_free_bytes": {
+        "series_id": "vllm_kv_cache_free_bytes",
+        "series_label": "KV 空闲容量",
+        "series_group": "KV Cache",
+        "description": "按照空闲 block 数计算的 KV 剩余容量。",
+        "render": "step",
+    },
+    "vllm.num_requests_waiting": {
+        "series_id": "vllm_num_requests_waiting",
+        "series_label": "等待请求数",
+        "series_group": "Scheduler",
+        "description": "当前在 vLLM scheduler 中等待执行的请求数。",
+        "render": "step",
+    },
+    "vllm.num_requests_running": {
+        "series_id": "vllm_num_requests_running",
+        "series_label": "运行请求数",
+        "series_group": "Scheduler",
+        "description": "当前已经被 scheduler 放进执行批次中的请求数。",
+        "render": "step",
+    },
+    "vllm.num_preemptions_delta": {
+        "series_id": "vllm_num_preemptions_delta",
+        "series_label": "抢占次数增量",
+        "series_group": "Scheduler",
+        "description": "每个采样周期内新增的 scheduler preemption 次数，直接来自 engine-core request preemption 事件。",
+        "render": "step",
+    },
+    "vllm.prefix_cache_queries_delta": {
+        "series_id": "vllm_prefix_cache_queries_delta",
+        "series_label": "Prefix Cache 查询 Token",
+        "series_group": "KV Cache",
+        "description": "每个采样周期内新发生的 prefix cache 查询 token 数，直接记录在 KVCacheManager 查询路径。",
+        "render": "step",
+    },
+    "vllm.prefix_cache_hits_delta": {
+        "series_id": "vllm_prefix_cache_hits_delta",
+        "series_label": "Prefix Cache 命中 Token",
+        "series_group": "KV Cache",
+        "description": "每个采样周期内新命中的 prefix cache token 数，直接记录在 KVCacheManager 查询路径。",
+        "render": "step",
+    },
+    "vllm.kv_event_stored_blocks_delta": {
+        "series_id": "vllm_kv_event_stored_blocks_delta",
+        "series_label": "新写入 Cache Block",
+        "series_group": "KV Events",
+        "description": "每个采样周期内新增进入 prefix cache 的 block 数，直接记录在 block pool cache_full_blocks 路径。",
+        "render": "step",
+    },
+    "vllm.kv_event_removed_blocks_delta": {
+        "series_id": "vllm_kv_event_removed_blocks_delta",
+        "series_label": "驱逐 Cache Block",
+        "series_group": "KV Events",
+        "description": "每个采样周期内被 block pool 驱逐出 prefix cache 的 block 数。",
+        "render": "step",
+    },
+    "vllm.kv_event_clears_delta": {
+        "series_id": "vllm_kv_event_clears_delta",
+        "series_label": "整表清空次数",
+        "series_group": "KV Events",
+        "description": "每个采样周期内 prefix cache 被整体清空的次数。",
+        "render": "step",
+    },
+}
+
 
 def _slugify(value: str) -> str:
     return value.replace("/", "_").replace("-", "_").replace(".", "_").replace(" ", "_").lower()
@@ -123,7 +259,7 @@ def _normalize_stage(name: str, category: str) -> dict[str, str]:
     if name == "trajectory.step":
         return _spec("trajectory_step", "环境轮次", "Interaction", "agent 与环境交互的一轮。")
     if name == "trajectory.tool_call":
-        return _spec("trajectory_tool_call", "工具执行", "Interaction", "执行模型产出的工具调用。")
+        return _spec("trajectory_tool_call", "工具调用轮次", "Interaction", "这一轮模型输出包含工具调用，环境会执行工具并返回结果。")
 
     # Cache spans
     if name == "cache.eviction":
@@ -156,6 +292,8 @@ def _normalize_stage(name: str, category: str) -> dict[str, str]:
         return _spec("env_reset", "环境重置", "Interaction", "重置环境到初始状态。")
     if name == "env.step":
         return _spec("env_step", "环境状态推进", "Interaction", "把模型回复作用到环境上，并拿回下一轮状态。")
+    if name == "env.start_sandbox":
+        return _spec("env_start_sandbox", "启动 Sandbox", "Interaction", "为当前任务准备 sandbox 环境和基础运行上下文。")
     if name == "env.format_response":
         return _spec("env_format_response", "环境侧格式化回复", "Interaction", "把模型输出转换成 agent / iflow 需要的 response payload。")
     if name == "env.fetch_request":
@@ -211,14 +349,21 @@ def _event_title(stage: dict[str, str], attrs: dict[str, Any], raw_name: str) ->
     env_step = attrs.get("env_step")
     label = stage["stage_label"]
     if env_step is not None and stage["stage_id"] in {
-        "env_turn",
-        "llm_request",
-        "prompt_encoding",
-        "token_decoding",
-        "generation_overhead",
-        "queue_wait",
-        "tool_execution",
-        "environment_transition",
+        "env_step",
+        "inference_request",
+        "inference_prefill",
+        "inference_decode",
+        "inference_overhead",
+        "rollout_wait_worker",
+        "trajectory_tool_call",
+        "env_start_sandbox",
+        "env_format_response",
+        "env_fetch_request",
+        "env_check_termination",
+        "env_parse_request",
+        "env_reward_test",
+        "env_restart_session",
+        "env_close",
     }:
         return f"{label} · 第{int(env_step) + 1}轮"
     if stage["stage_id"] == "trajectory_lifetime":
@@ -231,7 +376,7 @@ def _event_title(stage: dict[str, str], attrs: dict[str, Any], raw_name: str) ->
 def _event_style(stage_id: str, raw_name: str) -> str:
     if stage_id in {"step_total", "trajectory_lifetime"}:
         return "background"
-    if stage_id in {"env_turn", "generation_turn"} or raw_name == "generation":
+    if stage_id in {"inference_request", "inference_generate"} or raw_name == "inference.generate":
         return "muted"
     return "standard"
 
@@ -270,6 +415,8 @@ def _build_raw_rows(spans: list[dict[str, Any]], start_ref: int) -> list[dict[st
         span = by_id[span_id]
         attrs = span.get("attrs", {}) or {}
         stage = _normalize_stage(span["name"], span["category"])
+        sample_id = span.get("sample_id") or attrs.get("sample_id") or attrs.get("sample_uuid")
+        traj_id = span.get("traj_id") or attrs.get("traj_id")
         row = {
             "span_id": span["span_id"],
             "parent_id": span.get("parent_id"),
@@ -278,8 +425,8 @@ def _build_raw_rows(spans: list[dict[str, Any]], start_ref: int) -> list[dict[st
             "category": span["category"],
             "depth": depth,
             "step": span.get("step"),
-            "sample_id": span.get("sample_id"),
-            "traj_id": span.get("traj_id"),
+            "sample_id": sample_id,
+            "traj_id": traj_id,
             "process_label": span.get("process_label"),
             "duration_ms": span["duration_ms"],
             "start_offset_ms": round((span["start_time_ns"] - start_ref) / 1_000_000, 6),
@@ -322,7 +469,7 @@ def _mode_label(mode: Any) -> str:
 def _enrich_inference_rows(rows: list[dict[str, Any]]) -> None:
     request_map: dict[tuple[Any, Any], dict[str, Any]] = {}
     for row in rows:
-        if row["stage_id"] == "llm_request":
+        if row["stage_id"] == "inference_request":
             request_map[(row.get("traj_id"), row.get("sample_id"))] = row
 
     for row in rows:
@@ -341,35 +488,35 @@ def _enrich_inference_rows(rows: list[dict[str, Any]]) -> None:
         if row.get("env_step") is None:
             row["env_step"] = request_row.get("env_step")
         if row.get("env_step") is not None and row["stage_id"] in {
-            "prompt_encoding",
-            "token_decoding",
-            "generation_overhead",
-            "queue_wait",
+            "inference_prefill",
+            "inference_decode",
+            "inference_overhead",
+            "rollout_wait_worker",
         } and "Turn" not in row["title"]:
             row["title"] = f"{row['stage_label']} · Turn {int(row['env_step']) + 1}"
 
         prompt_tokens = row.get("request_prompt_tokens")
         output_tokens = row.get("request_output_tokens")
-        if row["stage_id"] == "prompt_encoding" and prompt_tokens:
+        if row["stage_id"] == "inference_prefill" and prompt_tokens:
             value = _safe_ratio(row["duration_ms"] * 1000.0, float(prompt_tokens))
             if value is not None:
                 row["performance_label"] = "Prefill 单位成本"
                 row["performance_value"] = round(value, 4)
                 row["performance_unit"] = "ms / 1k tok"
-        elif row["stage_id"] == "token_decoding" and output_tokens:
+        elif row["stage_id"] == "inference_decode" and output_tokens:
             value = _safe_ratio(row["duration_ms"], float(output_tokens))
             if value is not None:
                 row["performance_label"] = "Decode 单位成本"
                 row["performance_value"] = round(value, 6)
                 row["performance_unit"] = "ms / tok"
-        elif row["stage_id"] == "queue_wait":
+        elif row["stage_id"] == "rollout_wait_worker":
             total = request_row["duration_ms"]
             value = _safe_ratio(row["duration_ms"] * 100.0, total)
             if value is not None:
                 row["performance_label"] = "排队占比"
                 row["performance_value"] = round(value, 2)
                 row["performance_unit"] = "%"
-        elif row["stage_id"] == "generation_overhead":
+        elif row["stage_id"] == "inference_overhead":
             total = request_row["duration_ms"]
             value = _safe_ratio(row["duration_ms"] * 100.0, total)
             if value is not None:
@@ -379,7 +526,7 @@ def _enrich_inference_rows(rows: list[dict[str, Any]]) -> None:
 
 
 def _build_inference_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    request_rows = [row for row in rows if row["stage_id"] == "llm_request"]
+    request_rows = [row for row in rows if row["stage_id"] == "inference_request"]
     sample_groups: dict[tuple[Any, Any], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         if row.get("traj_id") and row.get("sample_id"):
@@ -394,15 +541,15 @@ def _build_inference_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
     total_output_tokens = 0
 
     for key, group_rows in sample_groups.items():
-        request_row = next((row for row in group_rows if row["stage_id"] == "llm_request"), None)
+        request_row = next((row for row in group_rows if row["stage_id"] == "inference_request"), None)
         if request_row is None:
             continue
         prompt_tokens = int(request_row.get("request_prompt_tokens") or request_row["attrs"].get("prompt_tokens") or 0)
         output_tokens = int(request_row.get("request_output_tokens") or request_row["attrs"].get("output_tokens") or 0)
-        prefill_ms = sum(row["duration_ms"] for row in group_rows if row["stage_id"] == "prompt_encoding")
-        decode_ms = sum(row["duration_ms"] for row in group_rows if row["stage_id"] == "token_decoding")
-        queue_ms = sum(row["duration_ms"] for row in group_rows if row["stage_id"] == "queue_wait")
-        overhead_ms = sum(row["duration_ms"] for row in group_rows if row["stage_id"] == "generation_overhead")
+        prefill_ms = sum(row["duration_ms"] for row in group_rows if row["stage_id"] == "inference_prefill")
+        decode_ms = sum(row["duration_ms"] for row in group_rows if row["stage_id"] == "inference_decode")
+        queue_ms = sum(row["duration_ms"] for row in group_rows if row["stage_id"] == "rollout_wait_worker")
+        overhead_ms = sum(row["duration_ms"] for row in group_rows if row["stage_id"] == "inference_overhead")
         total_ms = request_row["duration_ms"]
 
         total_prefill_ms += prefill_ms
@@ -522,8 +669,8 @@ def _build_trajectory_stats(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 if row.get("env_step") is not None
             }
         )
-        request_rows = [row for row in traj_rows if row["stage_id"] == "llm_request"]
-        tool_rows = [row for row in traj_rows if row["stage_id"] == "tool_execution"]
+        request_rows = [row for row in traj_rows if row["stage_id"] == "inference_request"]
+        tool_rows = [row for row in traj_rows if row["stage_id"] == "trajectory_tool_call"]
         stage_counts = Counter(row["stage_label"] for row in traj_rows if row["stage_id"] != "trajectory_lifetime")
         preview = next((row["preview"] for row in request_rows if row["preview"]), "")
         if not preview:
@@ -548,7 +695,7 @@ def _build_trajectory_stats(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "env_steps": env_steps,
                 "request_count": len(request_rows),
                 "tool_call_count": len(tool_rows),
-                "queue_wait_count": sum(1 for row in traj_rows if row["stage_id"] == "queue_wait"),
+                "rollout_wait_worker_count": sum(1 for row in traj_rows if row["stage_id"] == "rollout_wait_worker"),
                 "prompt_tokens_total": int(sum((row["attrs"].get("prompt_tokens") or 0) for row in request_rows)),
                 "output_tokens_total": int(sum((row["attrs"].get("output_tokens") or 0) for row in request_rows)),
                 "top_stages": stage_counts.most_common(4),
@@ -601,6 +748,7 @@ def _lane_event(row: dict[str, Any]) -> dict[str, Any]:
 
 def _include_in_trajectory_lane(row: dict[str, Any]) -> bool:
     return row["name"] in {
+        "env.reset",
         "trajectory.lifetime",
         "trajectory.step",
         "inference.request",
@@ -667,8 +815,8 @@ def _build_overview(
     stage_stats: list[dict[str, Any]],
     lanes: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    request_rows = [row for row in rows if row["stage_id"] == "llm_request"]
-    tool_rows = [row for row in rows if row["stage_id"] == "tool_execution"]
+    request_rows = [row for row in rows if row["stage_id"] == "inference_request"]
+    tool_rows = [row for row in rows if row["stage_id"] == "trajectory_tool_call"]
     preview_available = any(row.get("preview") for row in rows)
     longest_traj_ms = max((item["duration_ms"] for item in trajectory_stats), default=0.0)
     top_stage_candidates = [
@@ -683,7 +831,7 @@ def _build_overview(
         "process_count": len(summary["processes"]),
         "trajectory_count": len(trajectory_stats),
         "lane_count": len(lanes),
-        "llm_request_count": len(request_rows),
+        "inference_request_count": len(request_rows),
         "tool_call_count": len(tool_rows),
         "prompt_tokens_total": int(sum((row["attrs"].get("prompt_tokens") or 0) for row in request_rows)),
         "output_tokens_total": int(sum((row["attrs"].get("output_tokens") or 0) for row in request_rows)),
@@ -692,6 +840,105 @@ def _build_overview(
         "top_stage_label": top_stage["stage_label"] if top_stage else "",
         "top_stage_duration_ms": top_stage["total_duration_ms"] if top_stage else 0.0,
     }
+
+
+def _metric_series_spec(name: str) -> dict[str, str]:
+    spec = _METRIC_SERIES_SPECS.get(name)
+    if spec is not None:
+        return spec
+    label = _humanize_token(name.split(".")[-1] if "." in name else name)
+    return {
+        "series_id": _slugify(name),
+        "series_label": label,
+        "series_group": "Metrics",
+        "description": "尚未分类的指标时序。",
+        "render": "line",
+    }
+
+
+def _load_step_samples(trace_dir: str, step: int) -> list[dict[str, Any]]:
+    step_dir = Path(trace_dir) / "raw" / "samples" / "steps" / f"step_{step:06d}"
+    samples: list[dict[str, Any]] = []
+    if not step_dir.exists():
+        return samples
+    for path in sorted(step_dir.glob("*.jsonl")):
+        with path.open("r", encoding="utf-8") as fp:
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                samples.append(json.loads(line))
+    return samples
+
+
+def _build_metric_series(
+    samples: list[dict[str, Any]],
+    start_ref_ns: int,
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for sample in samples:
+        name = str(sample.get("name") or "")
+        if not name:
+            continue
+        attrs = sample.get("attrs") or {}
+        engine_label = str(attrs.get("engine") or sample.get("process_label") or "engine")
+        process_label = str(sample.get("process_label") or "process")
+        spec = _metric_series_spec(name)
+        grouped[(spec["series_id"], process_label, engine_label, name)].append(sample)
+
+    series_items: list[dict[str, Any]] = []
+    for (series_id, process_label, engine_label, name), group_samples in grouped.items():
+        group_samples.sort(key=lambda item: int(item.get("timestamp_ns", 0)))
+        spec = _metric_series_spec(name)
+        points = []
+        values: list[float] = []
+        for sample in group_samples:
+            try:
+                value = float(sample.get("value", 0.0))
+            except (TypeError, ValueError):
+                continue
+            timestamp_ns = int(sample.get("timestamp_ns", 0))
+            points.append(
+                {
+                    "offset_ms": round((timestamp_ns - start_ref_ns) / 1_000_000, 6),
+                    "value": round(value, 6),
+                    "attrs": sample.get("attrs") or {},
+                    "sample_id": sample.get("sample_id"),
+                    "traj_id": sample.get("traj_id"),
+                }
+            )
+            values.append(value)
+        if not points:
+            continue
+        series_items.append(
+            {
+                "series_id": series_id,
+                "series_key": f"{series_id}:{process_label}:{engine_label}",
+                "series_name": name,
+                "series_label": spec["series_label"],
+                "series_group": spec["series_group"],
+                "description": spec["description"],
+                "render": spec["render"],
+                "engine_label": engine_label,
+                "process_label": process_label,
+                "unit": group_samples[0].get("unit") or "",
+                "point_count": len(points),
+                "min_value": round(min(values), 6),
+                "max_value": round(max(values), 6),
+                "latest_value": round(values[-1], 6),
+                "points": points,
+            }
+        )
+
+    return sorted(
+        series_items,
+        key=lambda item: (
+            item["series_group"],
+            item["series_label"],
+            item["process_label"],
+            item["engine_label"],
+        ),
+    )
 
 
 def _load_step_spans(trace_dir: str, step: int) -> list[dict[str, Any]]:
@@ -707,6 +954,62 @@ def _load_step_spans(trace_dir: str, step: int) -> list[dict[str, Any]]:
                     continue
                 spans.append(json.loads(line))
     return spans
+
+
+def _load_misc_spans(trace_dir: str) -> list[dict[str, Any]]:
+    """Load spans from misc/ directory (env managers, etc.) that have no step set."""
+    misc_dir = Path(trace_dir) / "raw" / "misc"
+    spans: list[dict[str, Any]] = []
+    if not misc_dir.exists():
+        return spans
+    for path in sorted(misc_dir.glob("*.jsonl")):
+        with path.open("r", encoding="utf-8") as fp:
+            for line in fp:
+                line = line.strip()
+                if not line:
+                    continue
+                spans.append(json.loads(line))
+    return spans
+
+
+def _filter_misc_spans_by_step_window(
+    misc_spans: list[dict[str, Any]],
+    step_spans: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Filter misc spans to only include those overlapping with the step's time window."""
+    if not step_spans:
+        return []
+
+    coherent_step_spans, _ = _filter_incoherent_spans([s for s in step_spans if s.get("step") is not None])
+    latest_step_spans, _ = _select_latest_session_spans(coherent_step_spans)
+    root_candidates = [
+        span
+        for span in latest_step_spans
+        if span.get("name") == "pipeline.step" and span.get("process_label") == "driver"
+    ]
+    if not root_candidates:
+        root_candidates = [span for span in step_spans if span.get("name") == "pipeline.step"]
+    step_root = max(root_candidates, key=lambda span: int(span["end_time_ns"])) if root_candidates else None
+    if not step_root:
+        return []
+
+    step_start = int(step_root["start_time_ns"])
+    step_end = int(step_root["end_time_ns"])
+
+    # Add padding to include spans that start slightly before or end slightly after
+    padding_ns = 10 * 1_000_000_000  # 10 seconds padding
+    window_start = step_start - padding_ns
+    window_end = step_end + padding_ns
+
+    filtered = []
+    for span in misc_spans:
+        span_start = int(span.get("start_time_ns", 0))
+        span_end = int(span.get("end_time_ns", 0))
+        # Include if span overlaps with the step window
+        if span_start <= window_end and span_end >= window_start:
+            filtered.append(span)
+
+    return filtered
 
 
 def _filter_incoherent_spans(spans: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -747,7 +1050,7 @@ def _select_latest_session_spans(spans: list[dict[str, Any]]) -> tuple[list[dict
     root_spans = [
         span
         for span in spans
-        if span.get("name") == "pipeline/step" and span.get("process_label") == "driver"
+        if span.get("name") == "pipeline.step" and span.get("process_label") == "driver"
     ]
     if len(root_spans) <= 1:
         return spans, []
@@ -769,10 +1072,20 @@ def _select_latest_session_spans(spans: list[dict[str, Any]]) -> tuple[list[dict
     return selected, dropped
 
 
-def _build_step_bundle(spans: list[dict[str, Any]], step: int) -> dict[str, Any]:
-    spans, dropped_spans = _filter_incoherent_spans(spans)
-    spans, stale_session_spans = _select_latest_session_spans(spans)
-    dropped_spans.extend(stale_session_spans)
+def _build_step_bundle(spans: list[dict[str, Any]], samples: list[dict[str, Any]], step: int) -> dict[str, Any]:
+    # Separate step spans (pipeline-side) from misc spans (env-side)
+    step_spans = [s for s in spans if s.get("step") is not None]
+    misc_spans = [s for s in spans if s.get("step") is None]
+
+    # Apply filters only to step spans (they have pipeline.step roots)
+    step_spans, incoherent = _filter_incoherent_spans(step_spans)
+    step_spans, stale_session = _select_latest_session_spans(step_spans)
+    dropped_spans = incoherent + stale_session
+
+    # Re-attach misc spans without filtering (env spans don't have pipeline.step root,
+    # so session filtering is inappropriate for them)
+    spans = step_spans + misc_spans
+
     if dropped_spans:
         logger.warning(
             "Dropped %s trace spans while exporting step %s. Categories=%s",
@@ -799,7 +1112,7 @@ def _build_step_bundle(spans: list[dict[str, Any]], step: int) -> dict[str, Any]
                 "process_count": 0,
                 "trajectory_count": 0,
                 "lane_count": 0,
-                "llm_request_count": 0,
+                "inference_request_count": 0,
                 "tool_call_count": 0,
                 "prompt_tokens_total": 0,
                 "output_tokens_total": 0,
@@ -829,6 +1142,11 @@ def _build_step_bundle(spans: list[dict[str, Any]], step: int) -> dict[str, Any]
                 "slow_requests": [],
             },
             "stage_stats": [],
+            "metric_series": [],
+            "metric_overview": {
+                "series_count": 0,
+                "sample_count": 0,
+            },
             "lanes": [],
             "rows": [],
             "trajectory_stats": [],
@@ -841,8 +1159,10 @@ def _build_step_bundle(spans: list[dict[str, Any]], step: int) -> dict[str, Any]
         }
 
     spans.sort(key=lambda item: (item["start_time_ns"], item["end_time_ns"]))
-    start_ref = min(span["start_time_ns"] for span in spans)
-    end_ref = max(span["end_time_ns"] for span in spans)
+    time_points_ns = [int(span["start_time_ns"]) for span in spans] + [int(span["end_time_ns"]) for span in spans]
+    time_points_ns.extend(int(sample.get("timestamp_ns", 0)) for sample in samples if sample.get("timestamp_ns") is not None)
+    start_ref = min(time_points_ns)
+    end_ref = max(time_points_ns)
     rows = _build_raw_rows(spans, start_ref)
     _enrich_inference_rows(rows)
 
@@ -852,6 +1172,7 @@ def _build_step_bundle(spans: list[dict[str, Any]], step: int) -> dict[str, Any]
     trajectory_stats = _build_trajectory_stats(rows)
     lanes = _build_lanes(rows, trajectory_stats)
     inference_summary = _build_inference_summary(rows)
+    metric_series = _build_metric_series(samples, start_ref)
     summary = {
         "total_spans": len(spans),
         "processes": process_labels,
@@ -868,7 +1189,7 @@ def _build_step_bundle(spans: list[dict[str, Any]], step: int) -> dict[str, Any]
             "Prefill 主要受 prompt 长度和 KV cache 建立影响；Decode 主要受生成 token 数影响。"
         )
     if any(
-        row["stage_id"] in {"prompt_encoding", "token_decoding"} and row.get("attrs", {}).get("source") == "fallback_local_timing"
+        row["stage_id"] in {"inference_prefill", "inference_decode"} and row.get("attrs", {}).get("source") == "fallback_local_timing"
         for row in rows
     ):
         notes.append(
@@ -877,10 +1198,15 @@ def _build_step_bundle(spans: list[dict[str, Any]], step: int) -> dict[str, Any]
         )
     if dropped_spans:
         notes.append(f"导出这个 step 前，已过滤掉 {len(dropped_spans)} 个时间戳异常的 span。")
-    if not overview["preview_available"] and overview["llm_request_count"] > 0:
+    if not overview["preview_available"] and overview["inference_request_count"] > 0:
         notes.append(
             "当前这批 raw trace 还没有消息预览字段。"
             "等你用新版采集逻辑重新跑之后，页面里会直接显示输入/输出摘要。"
+        )
+    if metric_series:
+        notes.append(
+            "顶部状态时序图只展示当前 step 内采到的指标点。"
+            "KV block / scheduler 占用来自 vLLM engine-core 真值；preemption、prefix cache、cache store/evict/clear 展示的是每个采样周期内的真实增量。"
         )
 
     return {
@@ -889,6 +1215,11 @@ def _build_step_bundle(spans: list[dict[str, Any]], step: int) -> dict[str, Any]
         "overview": overview,
         "inference_summary": inference_summary,
         "stage_stats": stage_stats,
+        "metric_series": metric_series,
+        "metric_overview": {
+            "series_count": len(metric_series),
+            "sample_count": int(sum(item["point_count"] for item in metric_series)),
+        },
         "lanes": lanes,
         "rows": rows,
         "trajectory_stats": trajectory_stats,
@@ -1044,6 +1375,11 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
       gap: 16px;
       align-items: start;
     }
+    .main-panels {
+      display: grid;
+      gap: 16px;
+      min-width: 0;
+    }
     .panel {
       padding: 16px 18px;
     }
@@ -1059,6 +1395,9 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
     .timeline-panel {
       padding: 0;
       overflow: hidden;
+    }
+    .metric-panel-empty {
+      padding: 0 18px 18px;
     }
     .viewport {
       background: var(--timeline-bg);
@@ -1250,6 +1589,33 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
       white-space: pre-wrap;
       box-shadow: 0 12px 32px rgba(17, 24, 39, 0.28);
     }
+    .metric-series-label {
+      font-size: 12px;
+      font-weight: 700;
+      fill: var(--ink);
+    }
+    .metric-series-meta {
+      font-size: 11px;
+      fill: var(--muted);
+    }
+    .metric-grid-line {
+      stroke: rgba(139, 149, 165, 0.22);
+      stroke-width: 1;
+    }
+    .metric-baseline {
+      stroke: rgba(139, 149, 165, 0.42);
+      stroke-width: 1;
+    }
+    .metric-path {
+      fill: none;
+      stroke-width: 2.2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .metric-point {
+      stroke: #fffdf8;
+      stroke-width: 1.2;
+    }
     @media (max-width: 1180px) {
       .layout {
         grid-template-columns: 1fr;
@@ -1276,11 +1642,23 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
     </section>
 
     <div class="layout">
-      <section class="panel timeline-panel">
-        <div class="viewport">
-          <svg id="chart"></svg>
-        </div>
-      </section>
+      <div class="main-panels">
+        <section class="panel timeline-panel">
+          <div style="padding:16px 18px 0;">
+            <h3 style="margin:0;">状态时序</h3>
+            <div class="panel-note" style="margin:8px 0 14px;">只看当前 step 内的 vLLM 状态变化。上面看 KV cache / scheduler 的实时曲线，下面继续看 request 和 trajectory 的 span 时间线。</div>
+          </div>
+          <div id="metric-empty" class="panel-note metric-panel-empty" hidden>这个 step 里还没有导出的时序指标点。</div>
+          <div id="metric-viewport" class="viewport">
+            <svg id="metric-chart"></svg>
+          </div>
+        </section>
+        <section class="panel timeline-panel">
+          <div class="viewport">
+            <svg id="chart"></svg>
+          </div>
+        </section>
+      </div>
       <div class="sidebar">
         <section class="panel">
           <h3>选中事件</h3>
@@ -1356,6 +1734,8 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
       inference_decode: '#16a34a',
       inference_overhead: '#64748b',
       rollout_wait_worker: '#7c6f64',
+      cache_eviction: '#7c3aed',
+      cache_prefetch: '#6d28d9',
       weight_sync_load_infer: '#0369a1',
       weight_sync_offload_infer: '#155e75',
       rollout_put_batch: '#7c6f64',
@@ -1384,6 +1764,9 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
     const subtitle = document.getElementById('subtitle');
     const cards = document.getElementById('cards');
     const legend = document.getElementById('legend');
+    const metricChart = document.getElementById('metric-chart');
+    const metricViewport = document.getElementById('metric-viewport');
+    const metricEmpty = document.getElementById('metric-empty');
     const chart = document.getElementById('chart');
     const zoom = document.getElementById('zoom');
     const zoomLabel = document.getElementById('zoom-label');
@@ -1405,6 +1788,7 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
     const detailJson = document.getElementById('detail-json');
 
     const stageStats = data.stage_stats || [];
+    const metricSeries = data.metric_series || [];
     const lanes = data.lanes || [];
     const trajectoryStats = data.trajectory_stats || [];
     const overview = data.overview || {};
@@ -1415,6 +1799,7 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
     lanes.forEach((lane) => lane.events.forEach((event) => eventMap.set(event.event_id, { ...event, lane_id: lane.lane_id, lane_label: lane.lane_label })));
 
     const activeStages = new Set(stageStats.map((item) => item.stage_id));
+    const metricPalette = ['#1d4ed8', '#0f766e', '#b45309', '#7c3aed', '#b91c1c', '#0369a1', '#0891b2', '#65a30d'];
     const windowMs = Math.max(data.summary?.window_ms || 1, 1);
     const timeUnit = chooseTimeUnit(windowMs);
     const windowUnits = Math.max(windowMs / timeUnit.factor, 1);
@@ -1481,6 +1866,181 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
         .filter((lane) => lane.visibleEvents.length > 0);
     }
 
+    function metricColorForSeries(series, index) {
+      const paletteIndex = (index + Array.from(series.series_key || '').reduce((sum, ch) => sum + ch.charCodeAt(0), 0)) % metricPalette.length;
+      return metricPalette[paletteIndex];
+    }
+
+    function formatBytes(value) {
+      const abs = Math.abs(value);
+      if (!Number.isFinite(abs)) return 'n/a';
+      if (abs < 1024) return value.toFixed(abs >= 100 ? 0 : 1) + ' B';
+      const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+      let scaled = value;
+      let unitIndex = -1;
+      while (Math.abs(scaled) >= 1024 && unitIndex < units.length - 1) {
+        scaled /= 1024;
+        unitIndex += 1;
+      }
+      const scaledAbs = Math.abs(scaled);
+      const digits = scaledAbs >= 100 ? 0 : scaledAbs >= 10 ? 1 : 2;
+      return scaled.toFixed(digits) + ' ' + units[Math.max(unitIndex, 0)];
+    }
+
+    function formatSeriesValue(series, value) {
+      if (value === null || value === undefined || Number.isNaN(value)) return 'n/a';
+      if (series.unit === 'bytes') return formatBytes(value);
+      const abs = Math.abs(value);
+      const digits = abs >= 100 ? 0 : abs >= 10 ? 1 : abs >= 1 ? 2 : 3;
+      return value.toFixed(digits) + (series.unit ? ' ' + series.unit : '');
+    }
+
+    function buildMetricPath(series, xForOffset, yForValue) {
+      const points = series.points || [];
+      if (!points.length) return '';
+      let path = '';
+      if (series.render === 'step') {
+        path = 'M ' + xForOffset(points[0].offset_ms) + ' ' + yForValue(points[0].value);
+        for (let i = 1; i < points.length; i += 1) {
+          const prev = points[i - 1];
+          const curr = points[i];
+          path += ' L ' + xForOffset(curr.offset_ms) + ' ' + yForValue(prev.value);
+          path += ' L ' + xForOffset(curr.offset_ms) + ' ' + yForValue(curr.value);
+        }
+        return path;
+      }
+      return points.map((point, index) => (index === 0 ? 'M ' : 'L ') + xForOffset(point.offset_ms) + ' ' + yForValue(point.value)).join(' ');
+    }
+
+    function renderMetricSeries() {
+      if (!metricSeries.length) {
+        metricEmpty.hidden = false;
+        metricViewport.hidden = true;
+        metricChart.textContent = '';
+        return;
+      }
+
+      metricEmpty.hidden = true;
+      metricViewport.hidden = false;
+
+      const viewportWidth = Math.max(metricViewport.clientWidth || 0, 860);
+      const zoomValue = parseFloat(zoom.value || '18');
+      const width = Math.max(viewportWidth, windowUnits * zoomValue);
+      const leftPad = 168;
+      const rightPad = 28;
+      const topPad = 18;
+      const rowHeight = 62;
+      const bottomPad = 26;
+      const height = topPad + metricSeries.length * rowHeight + bottomPad;
+      const plotWidth = Math.max(width - leftPad - rightPad, 180);
+      const xForOffset = (offsetMs) => leftPad + (Math.max(0, Math.min(offsetMs, windowMs)) / windowMs) * plotWidth;
+
+      metricChart.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+      metricChart.setAttribute('width', width);
+      metricChart.setAttribute('height', height);
+      metricChart.textContent = '';
+
+      const tickCount = Math.max(4, Math.min(12, Math.floor(plotWidth / 120)));
+      const tickStepMs = niceStep(windowMs / tickCount);
+      for (let tickMs = 0; tickMs <= windowMs + 0.0001; tickMs += tickStepMs) {
+        const x = xForOffset(tickMs);
+        const grid = createSvg('line');
+        grid.setAttribute('x1', x);
+        grid.setAttribute('x2', x);
+        grid.setAttribute('y1', 0);
+        grid.setAttribute('y2', height - bottomPad + 4);
+        grid.setAttribute('class', 'metric-grid-line');
+        metricChart.appendChild(grid);
+
+        const label = createSvg('text');
+        label.setAttribute('x', x + 4);
+        label.setAttribute('y', height - 8);
+        label.setAttribute('class', 'axis-label');
+        label.textContent = formatUnitValue(tickMs / timeUnit.factor, tickStepMs / timeUnit.factor);
+        metricChart.appendChild(label);
+      }
+
+      metricSeries.forEach((series, index) => {
+        const rowTop = topPad + index * rowHeight;
+        const plotTop = rowTop + 8;
+        const plotBottom = rowTop + rowHeight - 14;
+        const plotHeight = Math.max(plotBottom - plotTop, 18);
+        const minValue = Number(series.min_value ?? 0);
+        const maxValue = Number(series.max_value ?? 0);
+        const span = maxValue - minValue;
+        const color = metricColorForSeries(series, index);
+        const yForValue = (value) => {
+          if (span <= 1e-9) {
+            return plotTop + plotHeight / 2;
+          }
+          return plotBottom - ((value - minValue) / span) * plotHeight;
+        };
+
+        const baseline = createSvg('line');
+        baseline.setAttribute('x1', leftPad);
+        baseline.setAttribute('x2', width - rightPad);
+        baseline.setAttribute('y1', plotBottom);
+        baseline.setAttribute('y2', plotBottom);
+        baseline.setAttribute('class', 'metric-baseline');
+        metricChart.appendChild(baseline);
+
+        const label = createSvg('text');
+        label.setAttribute('x', 14);
+        label.setAttribute('y', rowTop + 18);
+        label.setAttribute('class', 'metric-series-label');
+        label.textContent = series.series_label;
+        metricChart.appendChild(label);
+
+        const meta = createSvg('text');
+        meta.setAttribute('x', 14);
+        meta.setAttribute('y', rowTop + 35);
+        meta.setAttribute('class', 'metric-series-meta');
+        meta.textContent = (series.engine_label || 'engine') + ' · latest ' + formatSeriesValue(series, Number(series.latest_value || 0));
+        metricChart.appendChild(meta);
+
+        const range = createSvg('text');
+        range.setAttribute('x', 14);
+        range.setAttribute('y', rowTop + 50);
+        range.setAttribute('class', 'metric-series-meta');
+        range.textContent = 'min ' + formatSeriesValue(series, minValue) + ' · max ' + formatSeriesValue(series, maxValue);
+        metricChart.appendChild(range);
+
+        const path = createSvg('path');
+        path.setAttribute('d', buildMetricPath(series, xForOffset, yForValue));
+        path.setAttribute('class', 'metric-path');
+        path.setAttribute('stroke', color);
+        metricChart.appendChild(path);
+
+        const pointStep = (series.points || []).length > 120 ? Math.ceil((series.points || []).length / 120) : 1;
+        (series.points || []).forEach((point, pointIndex) => {
+          if (pointIndex % pointStep !== 0 && pointIndex !== series.points.length - 1) return;
+          const circle = createSvg('circle');
+          circle.setAttribute('cx', xForOffset(point.offset_ms));
+          circle.setAttribute('cy', yForValue(point.value));
+          circle.setAttribute('r', pointIndex === series.points.length - 1 ? 3.2 : 2.3);
+          circle.setAttribute('class', 'metric-point');
+          circle.setAttribute('fill', color);
+          circle.addEventListener('mousemove', (evt) => {
+            showTooltip(evt, {
+              title: series.series_label + ' · ' + (series.engine_label || 'engine'),
+              stage_label: series.series_label,
+              stage_group: series.series_group || 'Metrics',
+              start_offset_ms: point.offset_ms,
+              duration_ms: 0,
+              attrs: {
+                当前值: formatSeriesValue(series, point.value),
+                时间偏移: formatMs(point.offset_ms),
+                单位: series.unit || 'n/a',
+                说明: series.description,
+              },
+            });
+          });
+          circle.addEventListener('mouseleave', hideTooltip);
+          metricChart.appendChild(circle);
+        });
+      });
+    }
+
     function ensureSelected(visibleLaneItems) {
       const visibleEvents = visibleLaneItems.flatMap((lane) => lane.visibleEvents);
       const visibleIds = new Set(visibleEvents.map((event) => event.event_id));
@@ -1498,7 +2058,7 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
       const cardSpecs = [
         ['步骤窗口', formatMs(overview.window_ms || 0), (overview.lane_count || 0) + ' 条 lane'],
         ['轨迹数', String(overview.trajectory_count || 0), '最长 ' + formatMs(overview.longest_trajectory_ms || 0)],
-        ['LLM 请求数', String(overview.llm_request_count || 0), (overview.prompt_tokens_total || 0).toLocaleString() + ' 个 prompt token'],
+        ['LLM 请求数', String(overview.inference_request_count || 0), (overview.prompt_tokens_total || 0).toLocaleString() + ' 个 prompt token'],
         ['工具调用数', String(overview.tool_call_count || 0), (overview.output_tokens_total || 0).toLocaleString() + ' 个输出 token'],
         ['进程数', String(overview.process_count || 0), (data.summary?.processes || []).join(', ') || 'n/a'],
         ['主导阶段', overview.top_stage_label || 'n/a', overview.top_stage_duration_ms ? formatMs(overview.top_stage_duration_ms) : ''],
@@ -1561,7 +2121,7 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
       const lane = lanes.find((item) => item.traj_id === trajId);
       if (!lane) return;
       const preferred = lane.events.find((event) => event.stage_id === 'trajectory_lifetime')
-        || lane.events.find((event) => event.stage_id === 'llm_request')
+        || lane.events.find((event) => event.stage_id === 'inference_request')
         || lane.events[0];
       selectedEventId = preferred.event_id;
       render();
@@ -1600,7 +2160,7 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
     function pickRequestEvent(request) {
       const lane = lanes.find((item) => item.traj_id === request.traj_id);
       if (!lane) return;
-      const target = lane.events.find((event) => event.stage_id === 'llm_request' && event.sample_id === request.sample_id)
+      const target = lane.events.find((event) => event.stage_id === 'inference_request' && event.sample_id === request.sample_id)
         || lane.events.find((event) => event.request_id && event.request_id === request.request_id);
       if (!target) return;
       selectedEventId = target.event_id;
@@ -1773,6 +2333,12 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
       if (event.performance_label && event.performance_value !== null && event.performance_value !== undefined) {
         lines.push(event.performance_label + '=' + event.performance_value + ' ' + event.performance_unit);
       }
+      if (event.attrs) {
+        for (const [key, value] of Object.entries(event.attrs).slice(0, 5)) {
+          if (value === null || value === undefined || value === '') continue;
+          lines.push(key + '=' + (typeof value === 'object' ? JSON.stringify(value) : String(value)));
+        }
+      }
       if (event.preview) lines.push(event.preview);
       tooltip.textContent = lines.join('\\n');
       tooltip.style.opacity = '1';
@@ -1908,6 +2474,7 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
         ' · 可见 lane ' + visibleLaneItems.length + '/' + (lanes.length || 0) +
         ' · 时间窗口 ' + formatMs(windowMs) +
         ((data.summary?.dropped_spans || 0) > 0 ? ' · 过滤异常 span ' + data.summary.dropped_spans + ' 个' : '');
+      renderMetricSeries();
       renderTimeline(visibleLaneItems);
       renderDetail();
     }
@@ -1935,6 +2502,15 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
 def export_trace_step(trace_dir: str, step: int, max_exported_spans: int = 20000) -> str:
     trace_path = Path(trace_dir)
     spans = _load_step_spans(trace_dir, step)
+    samples = _load_step_samples(trace_dir, step)
+
+    # Also load and merge misc spans (env managers, etc.) that overlap with this step's time window
+    misc_spans = _load_misc_spans(trace_dir)
+    if misc_spans:
+        filtered_misc = _filter_misc_spans_by_step_window(misc_spans, spans)
+        if filtered_misc:
+            spans = spans + filtered_misc
+
     if len(spans) > max_exported_spans:
         logger.warning(
             "Skipping trace HTML export for step %s because span count %s exceeds limit %s.",
@@ -1944,7 +2520,7 @@ def export_trace_step(trace_dir: str, step: int, max_exported_spans: int = 20000
         )
         return ""
 
-    bundle = _build_step_bundle(spans, step)
+    bundle = _build_step_bundle(spans, samples, step)
     timeline_dir = trace_path / "timeline" / "steps"
     timeline_dir.mkdir(parents=True, exist_ok=True)
     json_path = timeline_dir / f"step_{step:06d}.json"
@@ -1990,7 +2566,7 @@ def _export_index(trace_dir: str) -> None:
                 "window_label": _format_duration_ms(bundle["summary"]["window_ms"]),
                 "html_path": f"steps/step_{bundle['step']:06d}.html",
                 "trajectory_count": overview.get("trajectory_count", 0),
-                "llm_request_count": overview.get("llm_request_count", 0),
+                "inference_request_count": overview.get("inference_request_count", 0),
                 "tool_call_count": overview.get("tool_call_count", 0),
                 "output_tokens_total": overview.get("output_tokens_total", 0),
                 "top_stage_label": overview.get("top_stage_label", ""),
@@ -2004,7 +2580,7 @@ def _export_index(trace_dir: str) -> None:
         f"<td>{item['total_spans']}</td>"
         f"<td title=\"{item['window_ms']} ms\">{item['window_label']}</td>"
         f"<td>{item['trajectory_count']}</td>"
-        f"<td>{item['llm_request_count']}</td>"
+        f"<td>{item['inference_request_count']}</td>"
         f"<td>{item['tool_call_count']}</td>"
         f"<td>{item['output_tokens_total']}</td>"
         f"<td>{item['top_stage_label'] or 'n/a'}</td>"

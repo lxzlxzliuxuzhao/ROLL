@@ -58,6 +58,65 @@ class WorkerBase:
         self.buffers = None
         self.buffer_cache = None
         self.tensor_lora_manager = TensorLoraManager()
+        self.lmcache_enabled = self._detect_lmcache_enabled()
+        self._lmcache_weight_update_invalidated = False
+
+    def _detect_lmcache_enabled(self) -> bool:
+        kv_transfer_config = getattr(getattr(self, "vllm_config", None), "kv_transfer_config", None)
+        if kv_transfer_config is None:
+            return False
+        kv_connector = getattr(kv_transfer_config, "kv_connector", None)
+        return isinstance(kv_connector, str) and kv_connector.startswith("LMCacheConnectorV1")
+
+    def _destroy_lmcache_engine(self, reason: str = "worker state transition"):
+        if not self.lmcache_enabled:
+            return
+
+        connector_reset = False
+        try:
+            from vllm.distributed.kv_transfer import (
+                get_kv_transfer_group,
+                has_kv_transfer_group,
+            )
+
+            if has_kv_transfer_group():
+                kv_connector = get_kv_transfer_group()
+                if hasattr(kv_connector, "reset_lmcache_engine"):
+                    kv_connector.reset_lmcache_engine(reason=reason)
+                    connector_reset = True
+                elif hasattr(kv_connector, "_lmcache_engine") and hasattr(
+                    kv_connector._lmcache_engine, "reset"
+                ):
+                    kv_connector._lmcache_engine.reset(reason=reason)
+                    connector_reset = True
+                if connector_reset:
+                    logger.info(f"Reset LMCache connector runtime state: {reason}")
+                    return
+        except Exception as e:
+            logger.warning(f"Failed to reset LMCache connector runtime state: {e}")
+
+        try:
+            from lmcache.integration.vllm.utils import ENGINE_NAME
+            from lmcache.v1.cache_engine import LMCacheEngineBuilder
+            if LMCacheEngineBuilder.get(ENGINE_NAME) is None:
+                return
+            LMCacheEngineBuilder.destroy(ENGINE_NAME)
+            logger.info(f"Destroyed LMCache engine: {reason}")
+        except Exception as e:
+            logger.warning(f"Failed to destroy LMCache engine ({reason}): {e}")
+
+    def _invalidate_lmcache_for_weight_update(self):
+        if not self.lmcache_enabled:
+            return
+        if self._lmcache_weight_update_invalidated:
+            return
+        self._lmcache_weight_update_invalidated = True
+        self._destroy_lmcache_engine(reason="weight update")
+
+    def _buffer_lora_weights(self, named_weights: Iterable[Tuple[str, torch.Tensor]]):
+        self._invalidate_lmcache_for_weight_update()
+        for name, weight in named_weights:
+            self.tensor_lora_manager.add_weight(name, weight)
 
     def reload_model(self):
         if not self.weight_loaded:
@@ -67,6 +126,7 @@ class WorkerBase:
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         # before updating the parameters, we need to reinitialize the previously released model
         self.reload_model()
+        self._invalidate_lmcache_for_weight_update()
         if vllm.__version__ < "0.8.5":
             from roll.third_party.vllm.vllm_utils import patch_vllm_moe_model_weight_loader
 
@@ -78,6 +138,7 @@ class WorkerBase:
         if not self.kv_cache_loaded:
             self.wake_up(["kv_cache"])
             self.kv_cache_loaded = True
+        self._lmcache_weight_update_invalidated = False
         if vllm.__version__ < "0.8.5" and self.buffers is not None:
             # https://github.com/vllm-project/vllm/issues/16564
             model = self.model_runner.model
@@ -94,9 +155,11 @@ class WorkerBase:
             # https://github.com/vllm-project/vllm/issues/16564
             model = self.model_runner.model
             self.buffers = {name: buffer.cpu().clone() for name, buffer in model.named_buffers()}
+        self._destroy_lmcache_engine(reason="offload_states")
         self.sleep(level)
         self.weight_loaded = False
         self.kv_cache_loaded = False
+        self._lmcache_weight_update_invalidated = False
         if hasattr(self, "recv_manager"):
             self.recv_manager.clear()
         gc.collect()
@@ -128,8 +191,7 @@ class WorkerBase:
                 yield name, weight
 
         if is_lora:
-            for name, weight in weights_iter():
-                self.tensor_lora_manager.add_weight(name, weight)
+            self._buffer_lora_weights(weights_iter())
             return
         self.load_weights(weights=weights_iter())
 
@@ -138,22 +200,24 @@ class WorkerBase:
         bucket_with_meta = MultiprocessingSerializer.deserialize(serialized_named_tensors[self.rank])
         named_params = named_tensors_from_bucket(**bucket_with_meta)
         if is_lora:
-            for name, weight in named_params:
-                self.tensor_lora_manager.add_weight(name, weight)
+            self._buffer_lora_weights(named_params)
             return
         self.load_weights([(name, weight) for name, weight in named_params])
 
     def process_weights_after_loading(self):
-        if (Version("0.11.0") == Version(vllm.__version__) or
-                Version("0.11.1rc1") == Version(vllm.__version__) or
-                Version("0.11.1rc2.dev0+gc3a722fcb.d20251021") == Version(vllm.__version__)):
-            from vllm.model_executor.model_loader.utils import process_weights_after_loading,set_default_torch_dtype
-            device_config = self.device_config
-            load_config = self.vllm_config.load_config
-            load_device = (device_config.device if load_config.device is None else load_config.device)
-            target_device = torch.device(load_device)
-            with set_default_torch_dtype(self.model_config.dtype):
-                process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
+        try:
+            if (Version("0.11.0") == Version(vllm.__version__) or
+                    Version("0.11.1rc1") == Version(vllm.__version__) or
+                    Version("0.11.1rc2.dev0+gc3a722fcb.d20251021") == Version(vllm.__version__)):
+                from vllm.model_executor.model_loader.utils import process_weights_after_loading,set_default_torch_dtype
+                device_config = self.device_config
+                load_config = self.vllm_config.load_config
+                load_device = (device_config.device if load_config.device is None else load_config.device)
+                target_device = torch.device(load_device)
+                with set_default_torch_dtype(self.model_config.dtype):
+                    process_weights_after_loading(self.model_runner.model,self.model_config,target_device)
+        finally:
+            self._lmcache_weight_update_invalidated = False
 
 
 class WorkerV1(WorkerBase):
@@ -166,4 +230,5 @@ class WorkerV1(WorkerBase):
     def custom_add_lora(self, peft_config) -> bool:
         lora_request = self.tensor_lora_manager.build_request(peft_config)
         super().reload_model()
+        self._invalidate_lmcache_for_weight_update()
         return self.model_runner.add_lora(lora_request)

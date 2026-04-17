@@ -592,13 +592,20 @@ class RouterClient:
                 payload["sampling_params"] = sampling_params
             case _:
                 raise NotImplementedError(f"strategy {self.strategy_name} is not supported")
+
+        for key in ("trace_step", "trace_request_id", "trace_sample_id", "trace_traj_id", "trace_env_step"):
+            value = req.meta_info.get(key)
+            if value is not None:
+                payload[key] = value
         return payload, request_id
 
-    def _postprocess_generate(self, req, response):
+    def _postprocess_generate(self, req, response, request_id):
         output_data = DataProto(meta_info=req.meta_info)
+        output_data.meta_info["request_id"] = str(request_id)
         output_data.meta_info["finish_reasons"] = response["finish_reasons"]
         output_data.meta_info["output_token_ids"] = response["output_token_ids"]
         output_data.meta_info["output_logprobs"] = response.get("output_logprobs", None)
+        output_data.meta_info["vllm_phase_timing"] = response.get("vllm_phase_timing")
         output_data.meta_info["eos_token_id"] = [self.eos_token_id, self.pad_token_id]
         output_data.meta_info["pad_token_id"] = self.pad_token_id
         return output_data
@@ -621,7 +628,7 @@ class RouterClient:
         finally:
             await self.proxy.on_request_routed(request_id)
 
-        return self._postprocess_generate(req, response)
+        return self._postprocess_generate(req, response, request_id)
 
     def generate_request_sync(self, req: DataProto, request_id, uid):
         payload, request_id = self._preprocess_generate(req, request_id)
@@ -633,7 +640,7 @@ class RouterClient:
         finally:
             self.proxy.on_request_routed_sync(request_id)
 
-        return self._postprocess_generate(req, response)
+        return self._postprocess_generate(req, response, request_id)
 
 class Router:
     def __init__(self, router_manager, workers, model_path, router_args: RouterArguments):

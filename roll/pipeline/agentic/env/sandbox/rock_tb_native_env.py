@@ -9,6 +9,7 @@ from roll.datasets.global_dataset import GlobalDataset, GlobalDatasetManager
 from roll.pipeline.agentic.env.rock.sandbox_manager_v2 import FailureMode, RunSessionResponse, SandboxManagerV2
 from roll.utils.constants import RAY_NAMESPACE, EpisodeStopReason
 from roll.utils.logging import get_logger
+from roll.utils.tracing import get_trace_manager
 
 
 class RockTBNativeEnv(Env):
@@ -32,6 +33,9 @@ class RockTBNativeEnv(Env):
         user_id: str = "0000",
         experiment_id: str = "test",
         auto_clear_seconds: int = 60 * 60,
+        sandbox_memory: str = "8g",
+        sandbox_cpus: float = 2.0,
+        sandbox_limit_cpus: Optional[float] = None,
         run_region: str = "",
         agent_timeout_sec: int = 60 * 40,
         test_timeout_sec: int = 60 * 10,
@@ -77,6 +81,9 @@ class RockTBNativeEnv(Env):
         self.user_id = user_id
         self.experiment_id = experiment_id
         self.auto_clear_seconds = auto_clear_seconds
+        self.sandbox_memory = sandbox_memory
+        self.sandbox_cpus = sandbox_cpus
+        self.sandbox_limit_cpus = sandbox_limit_cpus
         self.run_region = run_region
         self.startup_timeout = startup_timeout
 
@@ -215,6 +222,10 @@ class RockTBNativeEnv(Env):
                 self.logger.error(f"Failed to parse idx_range: {idx_range}, type: {type(idx_range)}")
                 raise TypeError(f"idx_range must be List[int], str, or iterable, got {type(idx_range)}") from e
 
+    def _trace_env_span(self, name: str, **attrs):
+        tracer = get_trace_manager()
+        return tracer.span(name, phase="env", category="env", attrs=attrs)
+
     def reset(self, seed=None) -> Tuple[List[Dict], Dict]:
         """Reset the environment and start a new episode."""
         super().reset(seed)
@@ -283,15 +294,46 @@ class RockTBNativeEnv(Env):
             EpisodeStopReason.EVAL_GT,
         ]:
             # 控制类action，主动终止，终止时计算一次reward
-            observation, tools, error_msg, self.reward = self.check_terminated(
-                next_request_payload="", force_terminated=True
+            with self._trace_env_span("env.check_termination", force_terminated=True, session_step=self.current_session_step):
+                observation, tools, error_msg, self.reward = self.check_terminated(
+                    next_request_payload="", force_terminated=True
+                )
+            action_is_valid = bool(info.get("action_is_valid", False))
+            metrics = {
+                "env_timeout": self.env_timeout,
+                "env_reset_failed": self.env_reset_failed,
+                "action_is_valid": action_is_valid,
+                "success": self.reward > 0,
+                "raw_reward": self.reward,
+                "current_step": self.current_step,
+                "task_id": self.task_id,
+            }
+            metrics_agg_mode = {
+                "action_is_valid": "mean",
+                "success": "last",
+                "raw_reward": "last",
+            }
+            info.update(
+                {
+                    "metrics": metrics,
+                    "metrics_agg_mode": metrics_agg_mode,
+                    "failure_mode": self.failure_mode,
+                    "error_messages": self.error_messages,
+                    "stop_reason": self.stop_reason,
+                    "test_output": self.test_output,
+                    "action_is_valid": action_is_valid,
+                    "terminated": True,
+                    "truncated": True,
+                }
             )
-            return observation, self.reward, True, True, {**info}
+            return observation, self.reward, True, True, info
 
-        response_payload, info = self.sandbox_manager.format_response_payload(response=action)
-        request_response: RunSessionResponse = self.sandbox_manager.fetch_agent_request(
-            index=self.current_session_step, response_payload=response_payload
-        )
+        with self._trace_env_span("env.format_response", session_step=self.current_session_step):
+            response_payload, info = self.sandbox_manager.format_response_payload(response=action)
+        with self._trace_env_span("env.fetch_request", session_step=self.current_session_step):
+            request_response: RunSessionResponse = self.sandbox_manager.fetch_agent_request(
+                index=self.current_session_step, response_payload=response_payload
+            )
         if request_response.exit_code != 0:
             # 交互失败，当前SESSION_END, 再次尝试交互
             self.env_reset_failed = True
@@ -305,11 +347,18 @@ class RockTBNativeEnv(Env):
 
         next_request_payload = next_request_payload.strip().split("\n")[-1]
 
-        observation, tools, error_msg, self.reward = self.check_terminated(next_request_payload=next_request_payload)
+        with self._trace_env_span(
+            "env.check_termination",
+            force_terminated=False,
+            session_step=self.current_session_step,
+            next_request_kind="session_end" if next_request_payload == "SESSION_END" else "request",
+        ):
+            observation, tools, error_msg, self.reward = self.check_terminated(next_request_payload=next_request_payload)
         if "SESSION_END" != next_request_payload:
-            observation, tools, error_msg = self.sandbox_manager.get_messages_and_tools(
-                request_payload=next_request_payload
-            )
+            with self._trace_env_span("env.parse_request", session_step=self.current_session_step):
+                observation, tools, error_msg = self.sandbox_manager.get_messages_and_tools(
+                    request_payload=next_request_payload
+                )
 
         if not observation:
             self.failure_mode = FailureMode.MODEL_SERVICE_ANTI_CALL_LLM_FAILED
@@ -342,6 +391,9 @@ class RockTBNativeEnv(Env):
             "error_messages": self.error_messages,
             "stop_reason": self.stop_reason,
             "test_output": self.test_output,
+            "action_is_valid": action_is_valid,
+            "terminated": self.terminated,
+            "truncated": self.truncated,
         }
         info.update(info_new)
         self.logger.info(
@@ -367,7 +419,14 @@ class RockTBNativeEnv(Env):
             self.session_num += 1
 
             # Always calculate reward when ending a session/episode
-            self.reward, error_info, test_output = self.calculate_reward()
+            with self._trace_env_span(
+                "env.reward_test",
+                session_num=self.session_num,
+                force_terminated=force_terminated,
+                step_limit_reached=step_limit_reached,
+                test_timeout_sec=self.test_timeout_sec,
+            ):
+                self.reward, error_info, test_output = self.calculate_reward()
 
             if step_limit_reached:
                 self.terminated = True
@@ -389,7 +448,12 @@ class RockTBNativeEnv(Env):
             if self.session_num < self.max_multi_session_num and not step_limit_reached and not force_terminated:
                 # Start new session with test output as prompt
                 prompt_with_test = f"{test_output}"
-                observation, tools, error_msg = self.reset_agent_status(prompt=prompt_with_test)
+                with self._trace_env_span(
+                    "env.restart_session",
+                    session_num=self.session_num,
+                    max_multi_session_num=self.max_multi_session_num,
+                ):
+                    observation, tools, error_msg = self.reset_agent_status(prompt=prompt_with_test)
                 # Reset termination flags since we're starting a new session
                 self.terminated = False
                 self.truncated = False
@@ -409,6 +473,8 @@ class RockTBNativeEnv(Env):
         self.task_name = ""
         self.prompt = ""
         self.sandbox_image = ""
+        self.tag = ""
+        self.start_script = ""
         self.reward, self.terminated, self.truncated = 0, False, False
         self.env_failed = False
         self.env_timeout = False
@@ -416,38 +482,47 @@ class RockTBNativeEnv(Env):
         self.agent_timeout = False
         self.is_closed = False
         self.current_step = 0
+        self.session_num = 0
         self.current_session_step = 0
+        self.rollout_time = 0.0
+        self.traj_tool_execute_time = 0
         self.error_messages.clear()
         self.failure_mode = ""
+        self.stop_reason = ""
         self.test_output = ""
         self.sandbox_ip = ""
         self.sandbox_id = ""
 
     def start_sandbox(self):
         """Initialize ROCK service and start base image."""
-        self.logger.info(
-            f"[SANDBOX_INIT] START - Initializing sandbox with image: {self.sandbox_image}, task: {self.task_name}"
-        )
-        self.sandbox_manager = SandboxManagerV2(
-            sandbox_image=self.sandbox_image,
-            logger=self.logger,
-            # xrl相关的参数
-            xrl_authorization=self.xrl_authorization,
-            sandbox_base_url=self.sandbox_base_url,
-            user_id=self.user_id,
-            experiment_id=self.experiment_id,
-            startup_timeout=self.startup_timeout,
-            default_timeout=self.timeout,
-            # iflow相关的参数
-            agent_config=self.agent_config,
-            # others
-            run_region=self.run_region,
-            start_script=self.start_script,
-            dataset_tag=self.tag,
-            test_files=self.test_files,
-            task_name=self.task_name,
-            debug=self.debug,
-        )
+        with self._trace_env_span("env.start_sandbox", sandbox_image=self.sandbox_image, task_name=self.task_name):
+            self.logger.info(
+                f"[SANDBOX_INIT] START - Initializing sandbox with image: {self.sandbox_image}, task: {self.task_name}"
+            )
+            self.sandbox_manager = SandboxManagerV2(
+                sandbox_image=self.sandbox_image,
+                logger=self.logger,
+                # xrl相关的参数
+                xrl_authorization=self.xrl_authorization,
+                sandbox_base_url=self.sandbox_base_url,
+                user_id=self.user_id,
+                experiment_id=self.experiment_id,
+                sandbox_memory=self.sandbox_memory,
+                sandbox_cpus=self.sandbox_cpus,
+                sandbox_limit_cpus=self.sandbox_limit_cpus,
+                auto_clear_seconds=self.auto_clear_seconds,
+                startup_timeout=self.startup_timeout,
+                default_timeout=self.timeout,
+                # iflow相关的参数
+                agent_config=self.agent_config,
+                # others
+                run_region=self.run_region,
+                start_script=self.start_script,
+                dataset_tag=self.tag,
+                test_files=self.test_files,
+                task_name=self.task_name,
+                debug=self.debug,
+            )
 
         if not self.sandbox_manager.is_environment_available:
             self.env_reset_failed = True
@@ -476,7 +551,8 @@ class RockTBNativeEnv(Env):
         self.current_session_step = 0
         observation, tools, error_msg = [], [], ""
 
-        start_agent_response = self.sandbox_manager.start_agent(prompt=prompt)
+        with self._trace_env_span("env.start_agent", session_num=self.session_num):
+            start_agent_response = self.sandbox_manager.start_agent(prompt=prompt)
         if start_agent_response.exit_code != 0:
             self.env_reset_failed = True
             self.failure_mode = FailureMode.AGENT_START_FAILED
@@ -487,9 +563,10 @@ class RockTBNativeEnv(Env):
             return observation, tools, error_msg
 
         # self.sandbox_manager.anti_call_llm(), 拿到iflow-cli的初始请求，解出messages和tools
-        request_response: RunSessionResponse = self.sandbox_manager.fetch_agent_request(
-            index=self.current_session_step
-        )
+        with self._trace_env_span("env.fetch_init_request", session_num=self.session_num):
+            request_response: RunSessionResponse = self.sandbox_manager.fetch_agent_request(
+                index=self.current_session_step
+            )
 
         request_payload = request_response.output
         request_payload = request_payload.strip().split("\n")[-1]
@@ -503,7 +580,8 @@ class RockTBNativeEnv(Env):
             self.terminated = True
             return observation, tools, error_msg
 
-        observation, tools, error_msg = self.sandbox_manager.get_messages_and_tools(request_payload=request_payload)
+        with self._trace_env_span("env.parse_init_request", session_num=self.session_num):
+            observation, tools, error_msg = self.sandbox_manager.get_messages_and_tools(request_payload=request_payload)
 
         if error_msg or not observation:
             self.env_reset_failed = True
@@ -526,8 +604,12 @@ class RockTBNativeEnv(Env):
 
     def close(self):
         """Close the environment and release resources."""
-        if not self.debug:
-            self.sandbox_manager.stop_sandbox()
+        if self.is_closed:
+            return
+        with self._trace_env_span("env.close", debug=self.debug):
+            if not self.debug and self.sandbox_manager is not None:
+                self.sandbox_manager.stop_sandbox()
+        self.is_closed = True
 
     @property
     def env_info(self) -> Dict:
