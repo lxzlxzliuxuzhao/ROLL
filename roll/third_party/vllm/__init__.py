@@ -1,5 +1,7 @@
 import os
 import pathlib
+import json
+import uuid
 from typing import Dict, List
 
 import torch
@@ -12,6 +14,7 @@ from vllm.usage.usage_lib import UsageContext
 
 from roll.platforms import current_platform
 import roll.third_party.vllm.fp8 as fp8
+from roll.third_party.vllm.engine_core_patch import patch_vllm_engine_core_inspection
 from roll.utils.import_utils import safe_import_class
 from roll.utils.logging import get_logger
 
@@ -44,8 +47,69 @@ else:
 logger.info(f"Using vllm version {vllm.__version__}")
 
 
+def _stringify_lmcache_env_value(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "True" if value else "False"
+    if isinstance(value, dict):
+        return json.dumps(value, sort_keys=True)
+    if isinstance(value, (list, tuple, set)):
+        return ",".join(str(item) for item in value)
+    return str(value)
+
+
+def _configure_lmcache(kwargs: Dict) -> bool:
+    lmcache_config = kwargs.pop("lmcache_config", None)
+    if lmcache_config is None:
+        return False
+
+    if "kv_transfer_config" in kwargs:
+        raise ValueError("`lmcache_config` can not be used together with `kv_transfer_config`.")
+
+    # Validate LMCache availability before the engine starts spawning workers.
+    import lmcache  # noqa: F401
+
+    lmcache_transfer_keys = {
+        "engine_id",
+        "kv_connector",
+        "kv_connector_extra_config",
+        "kv_connector_module_path",
+        "kv_role",
+    }
+    for key, value in lmcache_config.items():
+        if key in lmcache_transfer_keys:
+            continue
+        env_value = _stringify_lmcache_env_value(value)
+        if env_value is None:
+            continue
+        os.environ[f"LMCACHE_{key.upper()}"] = env_value
+
+    from vllm.config import KVTransferConfig
+
+    engine_id = lmcache_config.get("engine_id")
+    if not engine_id:
+        engine_id = f"roll-lmcache-{uuid.uuid4().hex}"
+
+    kwargs["kv_transfer_config"] = KVTransferConfig(
+        kv_connector=lmcache_config.get("kv_connector", "LMCacheConnectorV1Dynamic"),
+        kv_role=lmcache_config.get("kv_role", "kv_both"),
+        kv_connector_extra_config=lmcache_config.get("kv_connector_extra_config", {}),
+        kv_connector_module_path=lmcache_config.get(
+            "kv_connector_module_path", "lmcache.integration.vllm.lmcache_connector_v1"
+        ),
+        engine_id=engine_id,
+    )
+    logged_config = dict(lmcache_config)
+    logged_config["engine_id"] = engine_id
+    logger.info(f"LMCache enabled with config: {logged_config}")
+    return True
+
+
 async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
     kwargs["enable_sleep_mode"] = True
+    _configure_lmcache(kwargs)
+    patch_vllm_engine_core_inspection()
 
     if "worker_extension_cls" not in kwargs:
         # VLLM_USE_V1 is deprecated in vllm>=0.11.1

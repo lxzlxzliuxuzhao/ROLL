@@ -102,7 +102,7 @@ def generate_demo_trace(trace_dir: Path) -> list[str]:
             ):
                 _sleep(0.001)
             with manager.span(
-                "advantage/compute",
+                "advantage.compute",
                 phase="advantage",
                 category="advantage",
                 trace_context=step_span.child_context(),

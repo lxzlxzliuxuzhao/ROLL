@@ -28,6 +28,7 @@ _CURRENT_TRACE_CONTEXT: contextvars.ContextVar[Optional["TraceContext"]] = conte
 )
 _TRACE_MANAGERS: dict[tuple[str, int], "TraceManager"] = {}
 _TRACE_MANAGER_LOCK = threading.Lock()
+_TRACE_TIMESTAMP_PATTERN = re.compile(r"(?:_|-)\d{8}_\d{6}$")
 
 
 def _coerce_value(value: Any) -> Any:
@@ -71,10 +72,30 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _trace_timestamp() -> str:
+    existing = os.environ.get("ROLL_TRACE_TIMESTAMP")
+    if existing:
+        return existing
+    timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    os.environ["ROLL_TRACE_TIMESTAMP"] = timestamp
+    return timestamp
+
+
+def _append_trace_timestamp(output_dir: str) -> str:
+    trace_path = Path(output_dir)
+    if _TRACE_TIMESTAMP_PATTERN.search(trace_path.name):
+        return str(trace_path)
+    return str(trace_path.with_name(f"{trace_path.name}_{_trace_timestamp()}"))
+
+
 @dataclass
 class TracingConfig:
     enable: bool = field(default=False, metadata={"help": "Enable structured tracing."})
     output_dir: Optional[str] = field(default=None, metadata={"help": "Trace artifact output directory."})
+    timestamp_output_dir: bool = field(
+        default=True,
+        metadata={"help": "Append a run timestamp to the trace output directory name to avoid overwriting previous runs."},
+    )
     export_html: bool = field(default=True, metadata={"help": "Export interactive HTML timelines."})
     export_step_interval: int = field(
         default=1,
@@ -103,13 +124,21 @@ class TracingConfig:
 
     def resolve_output_dir(self, base_output_dir: Optional[str] = None) -> str:
         if self.output_dir:
-            return self.output_dir
-        if base_output_dir:
-            return os.path.join(base_output_dir, "traces")
-        return os.environ.get("ROLL_TRACE_DIR", "./output/traces")
+            resolved_output_dir = self.output_dir
+        elif base_output_dir:
+            resolved_output_dir = os.path.join(base_output_dir, "traces")
+        else:
+            resolved_output_dir = os.environ.get("ROLL_TRACE_DIR", "./output/traces")
+
+        if self.timestamp_output_dir:
+            resolved_output_dir = _append_trace_timestamp(resolved_output_dir)
+            self.output_dir = resolved_output_dir
+
+        return resolved_output_dir
 
     def apply_env(self, base_output_dir: Optional[str] = None) -> None:
         os.environ["ROLL_TRACE_ENABLE"] = "1" if self.enable else "0"
+        os.environ["ROLL_TRACE_TIMESTAMP_OUTPUT_DIR"] = "1" if self.timestamp_output_dir else "0"
         os.environ["ROLL_TRACE_DIR"] = self.resolve_output_dir(base_output_dir=base_output_dir)
         os.environ["ROLL_TRACE_EXPORT_HTML"] = "1" if self.export_html else "0"
         os.environ["ROLL_TRACE_EXPORT_STEP_INTERVAL"] = str(self.export_step_interval)
@@ -124,6 +153,7 @@ class TracingConfig:
         return cls(
             enable=_bool_env("ROLL_TRACE_ENABLE", False),
             output_dir=os.environ.get("ROLL_TRACE_DIR"),
+            timestamp_output_dir=_bool_env("ROLL_TRACE_TIMESTAMP_OUTPUT_DIR", True),
             export_html=_bool_env("ROLL_TRACE_EXPORT_HTML", True),
             export_step_interval=_int_env("ROLL_TRACE_EXPORT_STEP_INTERVAL", 1),
             flush_every_n_spans=_int_env("ROLL_TRACE_FLUSH_EVERY_N_SPANS", 32),
@@ -336,6 +366,9 @@ class NullTraceManager:
     def record_completed_span(self, *args, **kwargs) -> None:
         return None
 
+    def record_sample(self, *args, **kwargs) -> None:
+        return None
+
     def flush(self, step: Optional[int] = None) -> None:
         return None
 
@@ -353,10 +386,13 @@ class TraceManager:
         self.process_file_name = f"{self.process_label}-pid{os.getpid()}.jsonl"
         self._lock = threading.Lock()
         self._buffer: dict[str, list[dict[str, Any]]] = {}
+        self._sample_buffer: dict[str, list[dict[str, Any]]] = {}
         self._buffer_count = 0
         if self.enabled:
             (self.output_dir / "raw" / "steps").mkdir(parents=True, exist_ok=True)
             (self.output_dir / "raw" / "misc").mkdir(parents=True, exist_ok=True)
+            (self.output_dir / "raw" / "samples" / "steps").mkdir(parents=True, exist_ok=True)
+            (self.output_dir / "raw" / "samples" / "misc").mkdir(parents=True, exist_ok=True)
 
     def _bucket_key(self, step: Optional[int]) -> str:
         if step is None:
@@ -367,6 +403,11 @@ class TraceManager:
         if step is None:
             return self.output_dir / "raw" / "misc" / self.process_file_name
         return self.output_dir / "raw" / "steps" / self._bucket_key(step) / self.process_file_name
+
+    def _sample_bucket_path(self, step: Optional[int]) -> Path:
+        if step is None:
+            return self.output_dir / "raw" / "samples" / "misc" / self.process_file_name
+        return self.output_dir / "raw" / "samples" / "steps" / self._bucket_key(step) / self.process_file_name
 
     def new_context(
         self,
@@ -488,6 +529,49 @@ class TraceManager:
             duration_ms=round((int(end_time_ns) - int(start_time_ns)) / 1_000_000, 6),
         )
 
+    def record_sample(
+        self,
+        name: str,
+        value: Any,
+        *,
+        unit: Optional[str] = None,
+        kind: str = "gauge",
+        trace_context: Any = None,
+        step: Optional[int] = None,
+        sample_id: Optional[str] = None,
+        traj_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+        timestamp_ns: Optional[int] = None,
+        attrs: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not self.enabled:
+            return
+        context = TraceContext.from_any(trace_context)
+        record = {
+            "record_type": "sample",
+            "name": name,
+            "kind": kind,
+            "unit": unit,
+            "value": _coerce_value(value),
+            "timestamp_ns": int(timestamp_ns or time.time_ns()),
+            "trace_id": trace_id or (None if context is None else context.trace_id),
+            "step": step if step is not None else (None if context is None else context.step),
+            "sample_id": sample_id if sample_id is not None else (None if context is None else context.sample_id),
+            "traj_id": traj_id if traj_id is not None else (None if context is None else context.traj_id),
+            "attrs": _coerce_value(attrs or {}),
+            "pid": os.getpid(),
+            "process_label": self.process_label,
+        }
+        bucket = self._bucket_key(record["step"])
+        should_flush = False
+        with self._lock:
+            self._sample_buffer.setdefault(bucket, []).append(record)
+            self._buffer_count += 1
+            if self._buffer_count >= self.config.flush_every_n_spans:
+                should_flush = True
+        if should_flush:
+            self.flush()
+
     def flush(self, step: Optional[int] = None) -> None:
         if not self.enabled:
             return
@@ -499,6 +583,18 @@ class TraceManager:
                     continue
                 bucket_step = None if key == "misc" else int(key.split("_")[-1])
                 path = self._bucket_path(bucket_step)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("a", encoding="utf-8") as fp:
+                    for record in records:
+                        fp.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        self._buffer_count -= 1
+            sample_keys = [self._bucket_key(step)] if step is not None else list(self._sample_buffer.keys())
+            for key in sample_keys:
+                records = self._sample_buffer.pop(key, [])
+                if not records:
+                    continue
+                bucket_step = None if key == "misc" else int(key.split("_")[-1])
+                path = self._sample_bucket_path(bucket_step)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with path.open("a", encoding="utf-8") as fp:
                     for record in records:

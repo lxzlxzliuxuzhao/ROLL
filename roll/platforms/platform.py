@@ -112,9 +112,17 @@ class Platform:
 
     @classmethod
     def get_common_envs(cls) -> dict:
-        return {
-            "TORCH_EXTENSIONS_DIR": ""
-        }
+        envs = {"TORCH_EXTENSIONS_DIR": ""}
+        for key in (
+            "ROLL_TRACE_ENABLE", "ROLL_TRACE_DIR", "ROLL_TRACE_TIMESTAMP",
+            "ROLL_TRACE_TIMESTAMP_OUTPUT_DIR", "ROLL_TRACE_EXPORT_HTML",
+            "ROLL_TRACE_EXPORT_STEP_INTERVAL", "ROLL_TRACE_FLUSH_EVERY_N_SPANS",
+            "ROLL_TRACE_CAPTURE_ROLLOUT_SAMPLES", "ROLL_TRACE_CAPTURE_QUEUE",
+            "ROLL_TRACE_CAPTURE_GENERATION", "ROLL_TRACE_MAX_EXPORTED_SPANS_PER_STEP",
+        ):
+            if key in os.environ:
+                envs[key] = os.environ[key]
+        return envs
 
     @classmethod
     def get_custom_env_vars(cls) -> dict:

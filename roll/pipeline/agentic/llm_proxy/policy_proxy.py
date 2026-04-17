@@ -29,7 +29,12 @@ class PolicyProxy(BaseLLMProxy):
         lm_input.meta_info["generation_config"] = generation_config
         lm_input.meta_info["pad_to_seq_len"] = False
         src_rank = lm_input.meta_info.pop("src_rank")
-        response_data: Optional[DataProto] = self.router_client.generate_request_sync(req=lm_input, request_id=None, uid=src_rank)
+        request_id = lm_input.meta_info.get("trace_request_id")
+        response_data: Optional[DataProto] = self.router_client.generate_request_sync(
+            req=lm_input,
+            request_id=request_id,
+            uid=src_rank,
+        )
 
         if response_data is None or not is_report_data_finished(response_data):
             return None
@@ -58,6 +63,6 @@ class PolicyProxy(BaseLLMProxy):
         )
         request_repeat = lm_input.repeat(repeat_times=len(output_tokens))
         lm_output.non_tensor_batch = request_repeat.non_tensor_batch
-        lm_output.meta_info = request_repeat.meta_info
+        lm_output.meta_info = {**request_repeat.meta_info, **response_data.meta_info}
         lm_output.meta_info.pop("generation_config", None)
         return lm_output

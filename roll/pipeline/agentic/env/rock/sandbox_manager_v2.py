@@ -105,6 +105,10 @@ class SandboxManagerV2:
         sandbox_base_url: str = "http://localhost:8080",
         user_id: str = "0000",
         experiment_id: str = "test",
+        sandbox_memory: str = "8g",
+        sandbox_cpus: float = 2.0,
+        sandbox_limit_cpus: float | None = None,
+        auto_clear_seconds: int = 60 * 60,
         agent_config: dict = {
             "agent_type": "iflow-cli",
             "agent_version": "0.0.1",
@@ -127,6 +131,9 @@ class SandboxManagerV2:
         self.sandbox_base_url = sandbox_base_url
         self.user_id = user_id
         self.experiment_id = experiment_id
+        self.sandbox_memory = sandbox_memory
+        self.sandbox_cpus = sandbox_cpus
+        self.sandbox_limit_cpus = sandbox_limit_cpus
 
         self.agent_config = agent_config
 
@@ -148,7 +155,7 @@ class SandboxManagerV2:
         self.install_agent_timeout = install_agent_timeout
 
         self.image_id = sandbox_image
-        self.auto_clear_seconds = 60 * 60
+        self.auto_clear_seconds = auto_clear_seconds
         self.default_timeout = default_timeout
         self.head_content_limit = default_head_content_limit
 
@@ -306,6 +313,9 @@ class SandboxManagerV2:
                 image=self.image_id,
                 auto_clear_seconds=self.auto_clear_seconds,
                 startup_timeout=self.startup_timeout,
+                memory=self.sandbox_memory,
+                cpus=self.sandbox_cpus,
+                limit_cpus=self.sandbox_limit_cpus,
                 user_id = self.user_id,
                 experiment_id=self.experiment_id,
                 xrl_authorization=self.xrl_authorization
@@ -1167,7 +1177,7 @@ nohup {command} < /dev/null > {temp_output_file} 2>&1 &
         run_status, test_output = self.run_session_with_timeout(
             self.test_session_name,
             test_command,
-            60 * 20,
+            test_timeout_sec,
             "test.txt"
         )
         self.logger.info(f"[RUN_TESTS] Completed - Test run status: {run_status}, test_output: {json.dumps(test_output, ensure_ascii=False)}...")
