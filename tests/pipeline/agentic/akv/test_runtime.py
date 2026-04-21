@@ -50,6 +50,38 @@ def test_complete_request_turns_tool_call_stop_into_waiting_external():
     }
 
 
+def test_complete_request_releases_binding_for_successive_non_wait_requests():
+    runtime = AgenticKVRuntime(enabled=True, model_identity="model-a")
+    runtime.start_session(session_id="sess-2b", traj_id="traj-2b")
+    first_meta = runtime.build_request_meta(
+        session_id="sess-2b",
+        request_id="req-2b-a",
+        env_step=5,
+    )
+
+    first_result = runtime.complete_request(
+        session_id="sess-2b",
+        request_id="req-2b-a",
+        env_step=5,
+        finish_reasons=["stop"],
+        tool_names=[],
+        candidate_resume_point_id=first_meta["candidate_resume_point_id"],
+    )
+    second_meta = runtime.build_request_meta(
+        session_id="sess-2b",
+        request_id="req-2b-b",
+        env_step=6,
+    )
+
+    assert first_result == {
+        "session_id": "sess-2b",
+        "state": "running",
+        "resume_point_id": None,
+    }
+    assert second_meta["candidate_resume_point_id"] == "sess-2b:rp:1"
+    assert runtime.get_session("sess-2b").current_request_id == "req-2b-b"
+
+
 def test_build_request_meta_supports_explicit_resume_point_id():
     runtime = AgenticKVRuntime(enabled=True, model_identity="model-a")
     runtime.start_session(session_id="sess-3", traj_id="traj-3")
@@ -77,6 +109,32 @@ def test_build_request_meta_supports_explicit_resume_point_id():
     assert resumed_meta["latest_resume_point_id"] == "sess-3:rp:1"
     assert resumed_meta["candidate_resume_point_id"] == "sess-3:rp:2"
     assert runtime.get_session("sess-3").current_request_id == "req-3b"
+
+
+def test_invalid_explicit_resume_point_does_not_poison_next_request():
+    runtime = AgenticKVRuntime(enabled=True, model_identity="model-a")
+    runtime.start_session(session_id="sess-3b", traj_id="traj-3b")
+
+    try:
+        runtime.build_request_meta(
+            session_id="sess-3b",
+            request_id="req-3b-invalid",
+            env_step=1,
+            resume_point_id="sess-3b:rp:missing",
+        )
+    except KeyError as exc:
+        assert exc.args == ("sess-3b:rp:missing",)
+    else:
+        raise AssertionError("expected KeyError for missing explicit resume point")
+
+    valid_meta = runtime.build_request_meta(
+        session_id="sess-3b",
+        request_id="req-3b-valid",
+        env_step=2,
+    )
+
+    assert valid_meta["candidate_resume_point_id"] == "sess-3b:rp:1"
+    assert runtime.get_session("sess-3b").current_request_id == "req-3b-valid"
 
 
 def test_finish_session_marks_session_finished():

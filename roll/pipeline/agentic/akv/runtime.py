@@ -4,6 +4,7 @@ from typing import Any
 from roll.pipeline.agentic.akv.session import (
     ResumeBoundaryKind,
     TrajectoryKVSession,
+    TrajectoryKVSessionState,
     WaitReason,
 )
 
@@ -26,6 +27,18 @@ class AgenticKVRuntime:
     def get_session(self, session_id: str) -> TrajectoryKVSession:
         return self._sessions[session_id]
 
+    @staticmethod
+    def _release_active_request(session: TrajectoryKVSession, request_id: str) -> None:
+        if session.current_request_id is None:
+            return
+        if session.current_request_id != request_id:
+            raise ValueError(
+                f"cannot release request_id={request_id!r} while active request_id={session.current_request_id!r}"
+            )
+        session.current_request_id = None
+        if session.state == TrajectoryKVSessionState.RUNNING:
+            session.wait_reason = None
+
     def build_request_meta(
         self,
         session_id: str,
@@ -34,9 +47,9 @@ class AgenticKVRuntime:
         resume_point_id: str | None = None,
     ) -> dict[str, Any]:
         session = self.get_session(session_id)
-        session.mark_running(request_id=request_id)
         if resume_point_id is not None and resume_point_id not in session.resume_points:
             raise KeyError(resume_point_id)
+        session.mark_running(request_id=request_id)
         return {
             "enabled": True,
             "session_id": session_id,
@@ -72,6 +85,7 @@ class AgenticKVRuntime:
                 "resume_point_id": resume_point.resume_point_id,
                 "wait_reason": WaitReason.TOOL_WAIT.value,
             }
+        self._release_active_request(session, request_id)
         return {
             "session_id": session.session_id,
             "state": session.state.value,

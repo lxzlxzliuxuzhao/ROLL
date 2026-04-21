@@ -672,11 +672,12 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
         content = self.rollout_cache.history[-1]
         session_id = content.get("akv_session_id")
         request_agentic_kv = None
+        env_step = int(trace_attrs.get("env_step", self._current_traj_step(rollout_cache)))
         if self.akv_runtime.enabled and session_id:
             request_agentic_kv = self.akv_runtime.build_request_meta(
                 session_id=session_id,
                 request_id=request_id,
-                env_step=int(trace_attrs.get("env_step", self._current_traj_step(rollout_cache))),
+                env_step=env_step,
             )
             lm_input.meta_info["agentic_kv"] = request_agentic_kv
         input_messages = content['observation']
@@ -717,6 +718,17 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
             if lm_output is None:
                 finish_reasons = ["abort"]
                 request_span.update_attributes(output_tokens=0, finish_reasons=finish_reasons)
+                abort_agentic_kv = None
+                if self.akv_runtime.enabled and session_id and request_agentic_kv is not None:
+                    abort_agentic_kv = self.akv_runtime.complete_request(
+                        session_id=session_id,
+                        request_id=request_id,
+                        env_step=env_step,
+                        finish_reasons=finish_reasons,
+                        tool_names=[],
+                        candidate_resume_point_id=request_agentic_kv["candidate_resume_point_id"],
+                    )
+                    content["agentic_kv"] = abort_agentic_kv
                 return DataProto(
                     meta_info={
                         "stop_reason": GenerateStopReason.ABORT,
@@ -725,6 +737,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                         "trace_sample_id": sample_id,
                         "trace_traj_id": traj_id,
                         "trace_env_step": trace_attrs.get("env_step"),
+                        **({"agentic_kv": abort_agentic_kv} if abort_agentic_kv is not None else {}),
                     }
                 )
 
@@ -754,7 +767,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                 local_agentic_kv = self.akv_runtime.complete_request(
                     session_id=session_id,
                     request_id=request_id,
-                    env_step=int(trace_attrs.get("env_step", self._current_traj_step(rollout_cache))),
+                    env_step=env_step,
                     finish_reasons=finish_reasons,
                     tool_names=self._extract_tool_call_names(response_text),
                     candidate_resume_point_id=request_agentic_kv["candidate_resume_point_id"],
