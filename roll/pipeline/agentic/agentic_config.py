@@ -183,6 +183,19 @@ class EnvMonitorConfig:
 
 
 @dataclass
+class AgenticKVConfig:
+    enable: bool = field(default=False, metadata={"help": "Enable agentic KV semantic session layer."})
+    free_gpu_blocks_low_watermark: Optional[int] = field(
+        default=None,
+        metadata={"help": "Low watermark for free GPU blocks used by agentic KV unload hysteresis."},
+    )
+    free_gpu_blocks_high_watermark: Optional[int] = field(
+        default=None,
+        metadata={"help": "High watermark for free GPU blocks used by agentic KV unload hysteresis."},
+    )
+
+
+@dataclass
 class AgenticConfig(PPOConfig):
     # agentic related
     custom_envs: Dict[str, Any] = field(default_factory=dict, metadata={"help": "List of environment configurations."})
@@ -195,6 +208,10 @@ class AgenticConfig(PPOConfig):
     )
     env_monitor: EnvMonitorConfig = field(
         default_factory=EnvMonitorConfig, metadata={"help": "Environment monitoring configuration."}
+    )
+    agentic_kv: AgenticKVConfig = field(
+        default_factory=AgenticKVConfig,
+        metadata={"help": "Agentic KV semantic session configuration."},
     )
     dirty_data_mask: bool = field(default=False, metadata={"help": "if dirty data mask is True, will mask dirty data"})
     open_feedback_turn: bool = field(default=False, metadata={"help": "open feedback turn"})
