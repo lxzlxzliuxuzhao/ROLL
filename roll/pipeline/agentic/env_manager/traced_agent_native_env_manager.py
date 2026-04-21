@@ -12,6 +12,7 @@ import torch
 from codetiming import Timer
 from tensordict import TensorDict
 
+from roll.pipeline.agentic.akv.runtime import AgenticKVRuntime
 from roll.pipeline.agentic.agentic_config import AgenticConfig, EnvManagerConfig
 from roll.pipeline.agentic.env_manager.base_env_manager import RolloutCache
 from roll.distributed.scheduler.protocol import DataProto
@@ -35,6 +36,16 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
     tools: List[Dict]
     traj_start_time: float
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.akv_runtime = AgenticKVRuntime(
+            enabled=bool(
+                getattr(self.pipeline_config, "agentic_kv", None)
+                and self.pipeline_config.agentic_kv.enable
+            ),
+            model_identity=str(self.worker_config.model_args.model_name_or_path),
+        )
+
     @staticmethod
     def _normalize_preview(value: Any, limit: int = 240) -> str:
         if value is None:
@@ -47,6 +58,17 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
         if traj_id is None:
             return None
         return f"{traj_id}:step:{env_step}"
+
+    def _make_traj_group_id(self, episode_id: Optional[int]) -> Optional[str]:
+        if episode_id is None:
+            return None
+        return f"{self.env_config['tag']}_{self.env_config['group_id']}_{episode_id}_{self.group_seed}"
+
+    def _make_traj_id(self, episode_id: Optional[int]) -> Optional[str]:
+        traj_group_id = self._make_traj_group_id(episode_id)
+        if traj_group_id is None:
+            return None
+        return f"{traj_group_id}_{self.env_config['env_id']}"
 
     def _current_traj_step(self, rollout_cache: Optional[RolloutCache] = None) -> int:
         cache = rollout_cache if rollout_cache is not None else getattr(self, "rollout_cache", None)
@@ -542,6 +564,10 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
             "messages": None,     # agent input messages
             **info,
         })
+        traj_id = self._make_traj_id(self.episode_id)
+        if self.akv_runtime.enabled and traj_id is not None:
+            self.akv_runtime.start_session(session_id=traj_id, traj_id=traj_id)
+            self.rollout_cache.history[-1]["akv_session_id"] = traj_id
         return self.rollout_cache
 
     def step(self, llm_output: DataProto):
@@ -608,7 +634,8 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
         self.rollout_cache.history.append({
             "observation": copy.deepcopy(observation),
             "actions_left": self.env_config.max_steps - self.rollout_cache.step,
-            "messages": None
+            "messages": None,
+            "akv_session_id": self.rollout_cache.history[-1].get("akv_session_id"),
         })
         return self.rollout_cache
 
@@ -643,6 +670,15 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
         lm_input.meta_info["trace_request_id"] = request_id
 
         content = self.rollout_cache.history[-1]
+        session_id = content.get("akv_session_id")
+        request_agentic_kv = None
+        if self.akv_runtime.enabled and session_id:
+            request_agentic_kv = self.akv_runtime.build_request_meta(
+                session_id=session_id,
+                request_id=request_id,
+                env_step=int(trace_attrs.get("env_step", self._current_traj_step(rollout_cache))),
+            )
+            lm_input.meta_info["agentic_kv"] = request_agentic_kv
         input_messages = content['observation']
         prompt_tokens = int(input_ids.shape[1])
         message_roles = [msg.get("role", "unknown") for msg in input_messages if isinstance(msg, dict)]
@@ -713,6 +749,18 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
             content["finish_reasons"] = finish_reasons
             content["response_ids"] = response_ids
             content["messages"].append({"role": "assistant", "content": response_text})
+            if self.akv_runtime.enabled and session_id and request_agentic_kv is not None:
+                backend_agentic_kv = dict(lm_output.meta_info.get("agentic_kv") or {})
+                local_agentic_kv = self.akv_runtime.complete_request(
+                    session_id=session_id,
+                    request_id=request_id,
+                    env_step=int(trace_attrs.get("env_step", self._current_traj_step(rollout_cache))),
+                    finish_reasons=finish_reasons,
+                    tool_names=self._extract_tool_call_names(response_text),
+                    candidate_resume_point_id=request_agentic_kv["candidate_resume_point_id"],
+                )
+                lm_output.meta_info["agentic_kv"] = {**backend_agentic_kv, **local_agentic_kv}
+                content["agentic_kv"] = lm_output.meta_info["agentic_kv"]
 
             lm_output.meta_info["request_id"] = lm_output.meta_info.get("request_id") or request_id
             lm_output.meta_info["trace_request_id"] = request_id
