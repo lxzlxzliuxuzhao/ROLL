@@ -93,6 +93,44 @@ def test_mark_waiting_rejects_mismatched_request_binding():
         )
 
 
+def test_mark_running_rejects_rebinding_active_request():
+    session = TrajectoryKVSession.create(
+        session_id="sess-4b",
+        traj_id="traj-4b",
+        model_identity="model-d",
+    )
+    session.mark_running(request_id="req-4b-a")
+
+    with pytest.raises(ValueError, match="cannot rebind running session"):
+        session.mark_running(request_id="req-4b-b")
+
+
+def test_mark_waiting_rejects_duplicate_resume_point_id():
+    session = TrajectoryKVSession.create(
+        session_id="sess-4c",
+        traj_id="traj-4c",
+        model_identity="model-d",
+    )
+    session.mark_running(request_id="req-4c")
+    session.mark_waiting(
+        request_id="req-4c",
+        resume_point_id="rp-dup",
+        boundary_kind=ResumeBoundaryKind.REQUEST_END,
+        wait_reason=WaitReason.ENV_WAIT,
+        env_step=1,
+    )
+    session.mark_running(request_id="req-4c")
+
+    with pytest.raises(ValueError, match="already exists"):
+        session.mark_waiting(
+            request_id="req-4c",
+            resume_point_id="rp-dup",
+            boundary_kind=ResumeBoundaryKind.REQUEST_END_TOOL_CALL,
+            wait_reason=WaitReason.TOOL_WAIT,
+            env_step=2,
+        )
+
+
 def test_terminal_states_reject_rewrites():
     finished_session = TrajectoryKVSession.create(
         session_id="sess-5",

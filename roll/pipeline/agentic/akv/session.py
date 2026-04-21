@@ -54,6 +54,15 @@ class TrajectoryKVSession:
             TrajectoryKVSessionState.INVALIDATED,
         }:
             raise ValueError(f"cannot transition {self.state.value} session to running")
+        if (
+            self.state == TrajectoryKVSessionState.RUNNING
+            and self.current_request_id is not None
+            and self.current_request_id != request_id
+        ):
+            raise ValueError(
+                f"cannot rebind running session from request_id={self.current_request_id!r} "
+                f"to request_id={request_id!r}"
+            )
         self.state = TrajectoryKVSessionState.RUNNING
         self.current_request_id = request_id
         self.wait_reason = None
@@ -75,6 +84,8 @@ class TrajectoryKVSession:
                 f"cannot transition to waiting_external with request_id={request_id!r} "
                 f"while active request_id={self.current_request_id!r}"
             )
+        if resume_point_id in self.resume_points:
+            raise ValueError(f"resume_point_id {resume_point_id!r} already exists")
 
         resume_point = ResumePoint(
             session_id=self.session_id,
