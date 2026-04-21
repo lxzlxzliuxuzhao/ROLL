@@ -7,6 +7,7 @@ from roll.pipeline.agentic.akv import (
     TrajectoryKVSessionState,
     WaitReason,
 )
+from roll.pipeline.agentic.agentic_config import AgenticKVConfig
 
 
 def test_tool_wait_transition_to_waiting_external():
@@ -57,6 +58,65 @@ def test_waiting_session_can_finish_directly():
     assert session.wait_reason is None
 
 
+def test_mark_waiting_requires_active_request_binding():
+    session = TrajectoryKVSession.create(
+        session_id="sess-3",
+        traj_id="traj-3",
+        model_identity="model-c",
+    )
+
+    with pytest.raises(ValueError, match="without an active request"):
+        session.mark_waiting(
+            request_id="req-3",
+            resume_point_id="rp-3",
+            boundary_kind=ResumeBoundaryKind.REQUEST_END,
+            wait_reason=WaitReason.ENV_WAIT,
+            env_step=0,
+        )
+
+
+def test_mark_waiting_rejects_mismatched_request_binding():
+    session = TrajectoryKVSession.create(
+        session_id="sess-4",
+        traj_id="traj-4",
+        model_identity="model-d",
+    )
+    session.mark_running(request_id="req-4a")
+
+    with pytest.raises(ValueError, match="active request_id='req-4a'"):
+        session.mark_waiting(
+            request_id="req-4b",
+            resume_point_id="rp-4",
+            boundary_kind=ResumeBoundaryKind.REQUEST_END_TOOL_CALL,
+            wait_reason=WaitReason.TOOL_WAIT,
+            env_step=1,
+        )
+
+
+def test_terminal_states_reject_rewrites():
+    finished_session = TrajectoryKVSession.create(
+        session_id="sess-5",
+        traj_id="traj-5",
+        model_identity="model-e",
+    )
+    finished_session.mark_finished()
+    with pytest.raises(ValueError, match="terminal session state finished"):
+        finished_session.mark_finished()
+    with pytest.raises(ValueError, match="terminal session state finished"):
+        finished_session.mark_invalidated("reason")
+
+    invalidated_session = TrajectoryKVSession.create(
+        session_id="sess-6",
+        traj_id="traj-6",
+        model_identity="model-f",
+    )
+    invalidated_session.mark_invalidated("boom")
+    with pytest.raises(ValueError, match="terminal session state invalidated"):
+        invalidated_session.mark_finished()
+    with pytest.raises(ValueError, match="terminal session state invalidated"):
+        invalidated_session.mark_invalidated("again")
+
+
 def test_free_block_watermark_hysteresis():
     watermark = FreeBlockWatermark(low=10, high=20)
 
@@ -86,3 +146,22 @@ def test_free_block_watermark_hysteresis():
 def test_free_block_watermark_validation(low, high):
     with pytest.raises(ValueError):
         FreeBlockWatermark(low=low, high=high)
+
+
+@pytest.mark.parametrize(
+    ("low", "high"),
+    [
+        (None, 10),
+        (10, None),
+        (0, 10),
+        (10, 0),
+        (-1, 10),
+        (10, 9),
+    ],
+)
+def test_agentic_kv_config_watermark_validation(low, high):
+    with pytest.raises(ValueError):
+        AgenticKVConfig(
+            free_gpu_blocks_low_watermark=low,
+            free_gpu_blocks_high_watermark=high,
+        )

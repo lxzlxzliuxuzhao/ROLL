@@ -10,6 +10,7 @@ from omegaconf import DictConfig
 
 from roll.configs.base_config import PPOConfig, RouterArguments
 from roll.configs.worker_config import WorkerConfig
+from roll.pipeline.agentic.akv.watermark import FreeBlockWatermark
 from roll.utils.logging import get_logger
 
 
@@ -193,6 +194,16 @@ class AgenticKVConfig:
         default=None,
         metadata={"help": "High watermark for free GPU blocks used by agentic KV unload hysteresis."},
     )
+
+    def __post_init__(self):
+        low = self.free_gpu_blocks_low_watermark
+        high = self.free_gpu_blocks_high_watermark
+        if (low is None) != (high is None):
+            raise ValueError(
+                "free_gpu_blocks_low_watermark and free_gpu_blocks_high_watermark must be both set or both unset"
+            )
+        if low is not None and high is not None:
+            FreeBlockWatermark(low=low, high=high)
 
 
 @dataclass

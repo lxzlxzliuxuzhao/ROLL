@@ -68,6 +68,13 @@ class TrajectoryKVSession:
     ) -> ResumePoint:
         if self.state != TrajectoryKVSessionState.RUNNING:
             raise ValueError(f"cannot transition {self.state.value} session to waiting_external")
+        if self.current_request_id is None:
+            raise ValueError("cannot transition to waiting_external without an active request")
+        if self.current_request_id != request_id:
+            raise ValueError(
+                f"cannot transition to waiting_external with request_id={request_id!r} "
+                f"while active request_id={self.current_request_id!r}"
+            )
 
         resume_point = ResumePoint(
             session_id=self.session_id,
@@ -85,11 +92,21 @@ class TrajectoryKVSession:
         return resume_point
 
     def mark_finished(self) -> None:
+        if self.state in {
+            TrajectoryKVSessionState.FINISHED,
+            TrajectoryKVSessionState.INVALIDATED,
+        }:
+            raise ValueError(f"cannot rewrite terminal session state {self.state.value} via mark_finished")
         self.state = TrajectoryKVSessionState.FINISHED
         self.current_request_id = None
         self.wait_reason = None
 
     def mark_invalidated(self, reason: str) -> None:
+        if self.state in {
+            TrajectoryKVSessionState.FINISHED,
+            TrajectoryKVSessionState.INVALIDATED,
+        }:
+            raise ValueError(f"cannot rewrite terminal session state {self.state.value} via mark_invalidated")
         self.state = TrajectoryKVSessionState.INVALIDATED
         self.current_request_id = None
         self.wait_reason = None
