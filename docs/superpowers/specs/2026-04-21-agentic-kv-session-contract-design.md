@@ -99,7 +99,7 @@ One `Trajectory KV Session` may correspond to multiple backend requests across:
 
 Therefore, the semantic contract requires a stable session identity above backend request identity.
 
-## Ownership, Activity, and Intent
+## Ownership and Lifecycle
 
 ### Ownership
 
@@ -107,9 +107,18 @@ The semantic layer must know which KV state belongs to which `Trajectory KV Sess
 
 This ownership is trajectory-scoped first. The v1 contract does not require first-class management of cross-request shared cache objects. If static prefixes happen to stay resident and naturally hit later, that is allowed, but it is not the main object being scheduled.
 
-### Activity
+### Lifecycle States
 
-`active` means the session currently belongs to the inference backend active request set.
+The semantic contract is lifecycle-driven. v1 uses four session states:
+
+- `running`
+- `waiting_external`
+- `finished`
+- `invalidated`
+
+#### `running`
+
+`running` means the session currently belongs to the inference backend active request set.
 
 This definition is intentionally aligned with backend scheduling semantics such as `vLLM active set`. It does not mean:
 
@@ -117,27 +126,46 @@ This definition is intentionally aligned with backend scheduling semantics such 
 - the session is physically in CPU RAM
 - the session has or has not been offloaded
 
-The externally visible lifecycle states are:
+While a session is `running`, it is in use and is not eligible for `unload`.
 
-- `active`
-- `inactive`
-- `invalidated`
+#### `waiting_external`
 
-`inactive` means the session has left the active set but remains semantically recoverable. `invalidated` means it is no longer legal to resume from this session's prior `Resume Point`s.
+`waiting_external` means:
 
-### Intent
+- the current inference request has ended
+- the trajectory has not ended
+- the session is waiting for tool or env output before continuation
 
-The semantic layer exposes scheduling intent separately from lifecycle state:
+This is the primary Agentic RL scheduling state in v1.
 
-- `keep`
-- `managed`
-- `drop`
+Each transition into `waiting_external` automatically creates a new `Resume Point` at the request-end continuation boundary.
 
-These are semantic directives, not memory locations.
+Only `waiting_external` sessions participate in watermark-driven `unload`.
 
-- `keep` means the adapter must preserve a non-destructive fast recovery path
-- `managed` means the adapter may choose its own strategy but must still preserve legal `token-exact` resume semantics
-- `drop` means the session's resume obligation is explicitly revoked
+#### `finished`
+
+`finished` means the trajectory has completed normally and the session no longer has a continuation obligation.
+
+Owned resources may be released immediately when the session enters `finished`.
+
+#### `invalidated`
+
+`invalidated` means the system can no longer legally continue the session.
+
+This is not a normal scheduling state. It is a terminal state caused by incompatibility or loss of proof for `token-exact` continuation.
+
+### Lifecycle Transitions
+
+The main v1 lifecycle is:
+
+- `running -> waiting_external`
+- `waiting_external -> running`
+- `running -> finished`
+- `waiting_external -> finished`
+- `running -> invalidated`
+- `waiting_external -> invalidated`
+
+Retry or replay is not a separate state. It is a `resume` transition targeting an older legal `Resume Point`.
 
 ## Events
 
@@ -157,18 +185,52 @@ Important constraints:
 
 - `left_active` must use Agentic RL reasons such as `tool_wait`, `env_wait`, or `retry_wait`
 - for `tool_wait` and `env_wait`, the corresponding `left_active` event means the current inference request has ended while the trajectory session remains live
+- `left_active(..., tool_wait | env_wait, ...)` implies a transition from `running` to `waiting_external`
+- `env_result_ready(session, resume_point)` enables a later `waiting_external -> running` transition through `restore` and `resume`
+- `session_completed(session)` implies transition to `finished` and release of owned continuation obligation
 - `model_snapshot_changed` is a semantic invalidation boundary
 - `retry_requested` does not create branching in v1; it initiates rollback on a single lineage
+
+## Watermark-Based Unload Policy
+
+v1 does not use unconditional unload on every wait. It uses a capacity-target policy over waiting sessions.
+
+### Capacity Target
+
+The semantic policy is defined in terms of a capacity target such as:
+
+- minimum free blocks
+- minimum free HBM percentage
+
+The semantic layer allows a global target, but the v1 `vLLM` adapter may implement this first with per-engine or per-block-pool local targets.
+
+### Double Watermark
+
+The capacity target uses hysteresis:
+
+- when free capacity drops below `low watermark`, unload of eligible waiting sessions must begin
+- once unloading begins, it continues until free capacity reaches `high watermark`
+- between `low watermark` and `high watermark`, the system does not oscillate between unload and no-unload behavior
+
+### Eligible Sessions
+
+Only `waiting_external` sessions are eligible for watermark-driven unload.
+
+- `running` sessions cannot be unloaded
+- `finished` sessions are released rather than unloaded
+- `invalidated` sessions are not resumable
+
+### Unload Requirement
+
+If free capacity remains at or above `high watermark`, a `waiting_external` session may remain resident in HBM.
+
+If free capacity falls below `low watermark`, the adapter must unload enough eligible `waiting_external` private KV footprint to recover free capacity toward `high watermark`.
+
+This policy applies to private trajectory-owned KV footprint. Natural shared-prefix residency is not required to be removed.
 
 ## Command Surface
 
 The command surface is intentionally small.
-
-### Intent Commands
-
-- `set_keep(session)`
-- `set_managed(session)`
-- `set_drop(session)`
 
 ### Resource and Continuation Commands
 
@@ -178,28 +240,6 @@ The command surface is intentionally small.
 
 ### Command Semantics
 
-#### `set_keep(session)`
-
-Strong semantic guarantee:
-
-- the adapter must maintain a non-destructive fast recovery path for that session
-- silent degradation to "recompute only later" is not allowed
-
-#### `set_managed(session)`
-
-Strong semantic guarantee:
-
-- the adapter owns resource strategy selection
-- later `resume` must still satisfy `token-exact`
-- exact recomputation is allowed as a fallback
-
-#### `set_drop(session)`
-
-Strong semantic guarantee:
-
-- the session's resume obligation is revoked
-- existing `Resume Point`s for that session become illegal to use for future resume
-
 #### `unload(session, resume_point)`
 
 Strong semantic guarantee:
@@ -207,20 +247,15 @@ Strong semantic guarantee:
 - after success, the session's private KV footprint is no longer counted in the active HBM working set
 - the targeted `Resume Point` remains semantically recoverable
 
-For v1 tool-using trajectories, `unload` is not merely optional bookkeeping. When a request ends due to `tool_wait` or `env_wait` and the trajectory session remains live, the semantic default is that this session's private KV footprint must leave the active HBM working set. Keeping that private waiting-state KV resident in HBM without need is outside the intended v1 policy.
+For v1 tool-using trajectories, `unload` is tied to `waiting_external` and capacity pressure. When a request ends due to `tool_wait` or `env_wait`, the session becomes eligible for unload. If watermark pressure requires action, this waiting session's private KV footprint must leave the active HBM working set.
 
 This does not prescribe a specific mechanism. It may be satisfied by:
 
 - offload to CPU or external cache
 - another backend-specific preservation strategy
-- exact-state discard plus future exact recomputation, if compatible with the session's current intent
+- exact-state discard plus future exact recomputation, if exact continuation can still be proven later
 
 Natural shared-prefix residency is not required to be removed by `unload`.
-
-Intent compatibility is mandatory:
-
-- under `managed`, future exact recomputation is allowed
-- under `keep`, `unload` must still preserve a fast non-destructive recovery path and therefore cannot be satisfied by "recompute later only"
 
 #### `restore(session, resume_point)`
 
@@ -244,7 +279,7 @@ Strong semantic guarantee:
 
 Preconditions:
 
-- session is `inactive`
+- session is `waiting_external`
 - target `Resume Point` is legal
 - session is not `invalidated`
 
@@ -252,43 +287,36 @@ Postconditions:
 
 - session remains recoverable
 - private HBM footprint exits the active HBM working set
-- if session intent is `keep`, the session still retains a fast non-destructive recovery path
 
 Additional v1 rule:
 
-- after `tool_wait` or `env_wait`, successful handling of the waiting session requires satisfying the `unload` guarantee for the session's private KV footprint rather than leaving that waiting-state footprint resident in HBM
+- watermark-driven unload applies only to `waiting_external`
 
 ### `restore`
 
 Preconditions:
 
+- session is `waiting_external`
 - session is not `invalidated`
 - target `Resume Point` is legal
 
 Postconditions:
 
-- session remains `inactive`
+- session remains `waiting_external`
 - session enters a backend-specific fast-resume state
 
 ### `resume`
 
 Preconditions:
 
+- session is `waiting_external`
 - target `Resume Point` is legal
-- session has not been `drop`-ped
 - adapter can prove `token-exact` continuation
 
 Postconditions:
 
-- session becomes `active`
+- session becomes `running`
 - generation continues on the same legal lineage
-
-### `set_drop`
-
-Postconditions:
-
-- session becomes non-resumable
-- all prior `Resume Point`s for that session become illegal
 
 ## Correctness and Equivalence
 
@@ -332,11 +360,12 @@ This default may be widened by configuration to allow reuse across rollout phase
 A session or its `Resume Point`s must be invalidated when:
 
 - model snapshot compatibility is broken
-- the session is explicitly `drop`-ped
 - rollback to an earlier `Resume Point` succeeds and later future points are overwritten
 - the adapter can no longer prove `token-exact` continuation
 
 If exact continuation cannot be proven, the adapter must return invalidation or command failure. It must not silently perform approximate recovery.
+
+Normal completion is not invalidation. When a session reaches `finished`, its owned continuation resources may be released because no further resume is legal or required.
 
 ## Retry and Replay
 
@@ -362,13 +391,15 @@ The adapter must answer:
 - which backend requests currently implement a given `Trajectory KV Session`
 - when that session leaves or re-enters the `vLLM active set`
 - whether continuation is satisfied by direct reuse, externalized restore, or exact recomputation
+- how local capacity targets and low/high watermark policy are enforced for waiting sessions
 
 In v1, the critical adapter case is not generic cache reuse. It is the transition:
 
 - one `vLLM` request ends because a tool-call terminator or equivalent EOS is emitted
 - the request leaves the `vLLM active set`
 - the trajectory session remains live and waits for external output
-- the adapter must ensure that the session's private KV footprint no longer occupies the active HBM working set during that wait
+- the adapter evaluates local watermark pressure for the waiting session
+- if watermark pressure requires action, the adapter must ensure that the session's private KV footprint no longer occupies the active HBM working set during that wait
 - later, after tool or env output is appended, a new request continues the same session from a legal `Resume Point`
 
 ### Mapping Rules
@@ -397,13 +428,16 @@ It does not mean anything by itself about:
 
 This distinction is essential. Semantic activity and physical placement are different layers.
 
-However, v1 also requires one specific coupling between the two layers: when a session leaves the `vLLM active set` because of `tool_wait` or `env_wait`, its private KV footprint must no longer remain in the active HBM working set after unload handling completes.
+However, v1 also requires one specific coupling between the two layers: when a session is `waiting_external` and local watermark pressure requires unload, its private KV footprint must no longer remain in the active HBM working set after unload handling completes.
 
 ### `vLLM` Adapter Obligations
 
 - preserve stable session identity above request identity
 - surface transitions into and out of the active set
-- honor semantic intent and resource commands
+- enforce unload eligibility only for `waiting_external`
+- enforce low/high watermark policy against local engine or block-pool capacity targets
+- release owned continuation resources when session becomes `finished`
+- honor resource and continuation commands
 - refuse continuation when `token-exact` cannot be proven
 
 ### Backend Freedom
@@ -422,24 +456,19 @@ The semantic contract allows adapters with different strengths.
 
 ### `C0`
 
-- supports `set_managed`
 - supports `resume`
 - may satisfy `resume` through exact recomputation
 
 ### `C1`
 
 - supports `unload`
-- can explicitly reduce private HBM footprint
+- can explicitly reduce private HBM footprint for `waiting_external` sessions
+- enforces low/high watermark policy
 
 ### `C2`
 
 - supports `restore`
 - can prepare fast resume ahead of actual continuation
-
-### `C3`
-
-- supports `set_keep`
-- can guarantee a non-destructive fast recovery path
 
 `LMCache`-based implementations are expected to target `C1` or higher, but the semantic layer does not require `LMCache`.
 
@@ -449,6 +478,8 @@ This contract is intentionally centered on Agentic RL semantics:
 
 - trajectory-scoped ownership
 - leave and re-enter active set around tool and env waits
+- `running / waiting_external / finished / invalidated` lifecycle
+- watermark-driven unload of waiting sessions
 - explicit unload and restore primitives
 - exact resume correctness
 - linear retry/replay without branching
