@@ -54,7 +54,9 @@ Instead, it is a unified recoverable semantic object. If the system claims that 
 
 `Resume Point` is not a separate KV asset. It is a semantic boundary marker attached to a `Trajectory KV Session`.
 
-Each `Resume Point` identifies a safe continuation boundary where the session may later be restored and resumed. It refers to:
+Each `Resume Point` identifies a safe continuation boundary where the session may later be restored and resumed. In v1, the primary continuation boundary is request-scoped: one inference request ends, but the trajectory has not ended. This is the key Agentic RL case for tool and env waits.
+
+It refers to:
 
 - one `Trajectory KV Session`
 - one legal lineage position
@@ -72,9 +74,18 @@ It does not own physical KV state. The underlying implementation may support a `
 `Resume Point`s are created automatically at:
 
 - every `turn` boundary
-- every semantic `chunk` boundary explicitly declared by `env manager`
+- every request-end boundary that `env manager` declares as a legal continuation boundary for the same trajectory session
 
-`env manager` is the authority on semantic chunk boundaries. Output parsers or backend heuristics may observe candidate boundaries, but they do not define them in the semantic contract.
+In the `vLLM` setting, the most important v1 case is:
+
+- the request terminates because a tool-call terminator or equivalent EOS condition is emitted
+- the current inference request ends
+- the `Trajectory KV Session` does not end
+- after tool or env output is appended back into the prompt, a new inference request continues the same trajectory session
+
+So the semantic contract is not built around arbitrary backend chunking. It is built around legal request-end continuation boundaries inside one still-live trajectory.
+
+`env manager` remains the authority on which request-end boundaries are legal continuation points for the trajectory. Output parsers or backend heuristics may observe candidate boundaries, but they do not define them in the semantic contract.
 
 ### Stable Identity vs Execution Identity
 
@@ -145,6 +156,7 @@ Core events:
 Important constraints:
 
 - `left_active` must use Agentic RL reasons such as `tool_wait`, `env_wait`, or `retry_wait`
+- for `tool_wait` and `env_wait`, the corresponding `left_active` event means the current inference request has ended while the trajectory session remains live
 - `model_snapshot_changed` is a semantic invalidation boundary
 - `retry_requested` does not create branching in v1; it initiates rollback on a single lineage
 
@@ -195,6 +207,8 @@ Strong semantic guarantee:
 - after success, the session's private KV footprint is no longer counted in the active HBM working set
 - the targeted `Resume Point` remains semantically recoverable
 
+For v1 tool-using trajectories, `unload` is not merely optional bookkeeping. When a request ends due to `tool_wait` or `env_wait` and the trajectory session remains live, the semantic default is that this session's private KV footprint must leave the active HBM working set. Keeping that private waiting-state KV resident in HBM without need is outside the intended v1 policy.
+
 This does not prescribe a specific mechanism. It may be satisfied by:
 
 - offload to CPU or external cache
@@ -239,6 +253,10 @@ Postconditions:
 - session remains recoverable
 - private HBM footprint exits the active HBM working set
 - if session intent is `keep`, the session still retains a fast non-destructive recovery path
+
+Additional v1 rule:
+
+- after `tool_wait` or `env_wait`, successful handling of the waiting session requires satisfying the `unload` guarantee for the session's private KV footprint rather than leaving that waiting-state footprint resident in HBM
 
 ### `restore`
 
@@ -345,6 +363,14 @@ The adapter must answer:
 - when that session leaves or re-enters the `vLLM active set`
 - whether continuation is satisfied by direct reuse, externalized restore, or exact recomputation
 
+In v1, the critical adapter case is not generic cache reuse. It is the transition:
+
+- one `vLLM` request ends because a tool-call terminator or equivalent EOS is emitted
+- the request leaves the `vLLM active set`
+- the trajectory session remains live and waits for external output
+- the adapter must ensure that the session's private KV footprint no longer occupies the active HBM working set during that wait
+- later, after tool or env output is appended, a new request continues the same session from a legal `Resume Point`
+
 ### Mapping Rules
 
 - `Trajectory KV Session` is the stable semantic object
@@ -370,6 +396,8 @@ It does not mean anything by itself about:
 - external cache presence
 
 This distinction is essential. Semantic activity and physical placement are different layers.
+
+However, v1 also requires one specific coupling between the two layers: when a session leaves the `vLLM active set` because of `tool_wait` or `env_wait`, its private KV footprint must no longer remain in the active HBM working set after unload handling completes.
 
 ### `vLLM` Adapter Obligations
 
