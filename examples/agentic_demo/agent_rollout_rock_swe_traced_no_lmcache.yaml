@@ -1,0 +1,15 @@
+defaults:
+  - agent_rollout_rock_swe_traced
+  - _self_
+
+exp_name: "agentic_rollout_swe_no_lmcache"
+
+actor_infer:
+  strategy_args:
+    strategy_config:
+      # Keep vLLM native prefix caching on for a fair A/B comparison.
+      enable_prefix_caching: true
+      lmcache_config: null
+
+agentic_kv:
+  enable: false

@@ -10,7 +10,7 @@ hydra:
     dir: .
   output_subdir: null
 
-exp_name: "agentic_rollout_swe"
+exp_name: "agentic_rollout_swe_traced"
 seed: 42
 
 logging_dir: ./output/logs
@@ -20,14 +20,6 @@ rollout_dump_dir: ./output/rollout_dump
 system_envs:
   USE_MODELSCOPE: '1'
 
-checkpoint_config:
-  type: file_system
-  output_dir: ./data
-
-sandbox_memory: "2g"
-sandbox_cpus: 1.0
-# sandbox_limit_cpus: 1.0
-
 tracing:
   enable: true
   output_dir: ./output/traces
@@ -35,13 +27,7 @@ tracing:
   export_html: true
   export_step_interval: 1
 
-pipeline_cls: roll.pipeline.agentic.traced_agentic_pipeline.TracedAgenticPipeline
-
-agentic_kv:
-  enable: true
-  # Active-only HBM experiment: save on tool-wait boundaries, then evict
-  # cached-free GPU KV blocks so resume goes through LMCache reload.
-  max_cached_free_blocks: 0
+pipeline_cls: roll.pipeline.agentic.traced_agentic_rollout_pipeline.TracedAgenticRolloutPipeline
 
 num_gpus_per_node: 8
 rpc_timeout: 72000
@@ -52,13 +38,11 @@ logging_steps: 1
 eval_steps: 5
 resume_from_checkpoint: false
 
-# async_generation_ratio: 1
-
-rollout_batch_size: 16
+rollout_batch_size: 64
 val_batch_size: 1
-sequence_length: 65536
+sequence_length: 40960
 
-max_tokens_per_step: 8192
+max_tokens_per_step: 4096
 
 advantage_clip: 0.2
 ppo_epochs: 1
@@ -66,62 +50,43 @@ adv_estimator: "step_reinforce"
 batch_adjust_mode: "random_sample"
 step_reward_gamma: 1.0
 
-#pg_clip: 0.1
-#dual_clip_loss: True
 init_kl_coef: 0.0
 whiten_advantages: true
 entropy_loss_coef: 0
 max_grad_norm: 1.0
 
-
-pretrain: Qwen/Qwen3-4B-Instruct-2507
-reward_pretrain: Qwen/Qwen3-4B-Instruct-2507
+pretrain: /raid/lxz/Qwen3-30B-A3B
+reward_pretrain: /raid/lxz/Qwen3-30B-A3B
 
 actor_train:
   model_args:
     flash_attn: fa2
-    disable_gradient_checkpointing: false  # 保持启用梯度检查点
+    disable_gradient_checkpointing: false
     dtype: bf16
     model_type: ~
-  training_args:
-    learning_rate: 1.0e-6
-    weight_decay: 0
-    per_device_train_batch_size: 1
-    gradient_accumulation_steps: 16
-    warmup_steps: 0
-  data_args:
-    template: qwen3_coder
-  strategy_args:
-    strategy_name: megatron_train
-    strategy_config:
-      tensor_model_parallel_size: 4
-      pipeline_model_parallel_size: 1
-      expert_model_parallel_size: 1
-      context_parallel_size: 1
-      use_distributed_optimizer: false
-      recompute_granularity: full
-  device_mapping: list(range(2,6))
-  infer_batch_size: 1
+
 actor_infer:
   model_args:
     flash_attn: fa2
     disable_gradient_checkpointing: true
     dtype: bf16
   generating_args:
-    max_new_tokens: ${max_tokens_per_step} # single-turn response length
+    max_new_tokens: ${max_tokens_per_step}
     top_p: 1.0
     top_k: 50
     num_beams: 1
     temperature: 1.0
     num_return_sequences: 1
-    stop_strings: ["</tool_call>","</tool_call>\n","\n</tool_call>\n","\n</function>"]
+    stop_strings: ["</tool_call>", "</tool_call>\n", "\n</tool_call>\n", "\n</function>"]
     include_stop_str_in_output: true
   data_args:
     template: qwen3_coder
   strategy_args:
     strategy_name: vllm
     strategy_config:
-      gpu_memory_utilization: 0.8
+      log_level: debug
+      stats_log_interval: 1
+      gpu_memory_utilization: 0.9
       block_size: 16
       load_format: auto
       tensor_parallel_size: 2
@@ -134,51 +99,34 @@ actor_infer:
         enable_async_loading: false
   device_mapping: list(range(0,2))
 
-reference:
-  model_args:
-    attn_implementation: fa2
-    disable_gradient_checkpointing: true
-    dtype: bf16
-    model_type: ~
-  data_args:
-    template: qwen3_coder
-  strategy_args:
-    strategy_name: megatron_infer
-    strategy_config:
-      tensor_model_parallel_size: 4
-      pipeline_model_parallel_size: 1
-      expert_model_parallel_size: 1
-      context_parallel_size: 1
-  device_mapping: list(range(2,6))
-  infer_batch_size: 1
-
 reward_normalization:
   grouping: traj_group_id
-  method: identity
-  # norm_mean_type: batch
-  # norm_std_type: group
+  method: mean
+
+agentic_kv:
+  enable: true
+  free_gpu_blocks_low_watermark: 256
+  # Watermarks now track cold free blocks only.
+  # With block_size=16, 2048 blocks is about 32k cold-token slack after unload.
+  free_gpu_blocks_high_watermark: 2048
 
 train_env_manager:
   max_env_num_per_worker: 1
   num_env_groups: 1
-  # under the same group, the env config and env seed are ensured to be equal
-  group_size: 16
-  tags: [RockTBNativeEnvTrain]
-  num_groups_partition: [1] # If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  group_size: 64
+  tags: [swebench_native_verified]
+  num_groups_partition: [1]
   system_envs:
-    # if you cannot get python env in rock due to connetion error, try to use this, may expire in the future
     ROCK_RTENV_PYTHON_V31114_INSTALL_CMD: '[ -f cpython31115.tar.gz ] && rm cpython31115.tar.gz; [ -d python ] && rm -rf python; wget -q -O cpython31115.tar.gz https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone/20260303/cpython-3.11.15+20260303-x86_64-unknown-linux-gnu-install_only.tar.gz && tar -xzf cpython31115.tar.gz && mv python runtime-env'
 
 val_env_manager:
   max_env_num_per_worker: 1
   num_env_groups: 1
-  group_size: 1 # should be set to 1 because val temperature is set to 0 and same prompt leads to same output
+  group_size: 1
   tags: [swebench_native_verified]
-  num_groups_partition: [1] # TODO: If not set, all env names divide nums equally. Under the same group, the env config and env seed (prompt) are equal in each generation
+  num_groups_partition: [1]
   system_envs:
-    # if you cannot get python env in rock due to connetion error, try to use this, may expire in the future
     ROCK_RTENV_PYTHON_V31114_INSTALL_CMD: '[ -f cpython31115.tar.gz ] && rm cpython31115.tar.gz; [ -d python ] && rm -rf python; wget -q -O cpython31115.tar.gz https://mirror.nju.edu.cn/github-release/astral-sh/python-build-standalone/20260303/cpython-3.11.15+20260303-x86_64-unknown-linux-gnu-install_only.tar.gz && tar -xzf cpython31115.tar.gz && mv python runtime-env'
-
 
 max_actions_per_traj: 60
 env_manager_cls: roll.pipeline.agentic.env_manager.traced_agent_native_env_manager.TracedAgentNativeStepEnvManager
@@ -186,7 +134,6 @@ env_manager_cls: roll.pipeline.agentic.env_manager.traced_agent_native_env_manag
 agent_config_common:
   agent_type: "default"
   run_cmd: 'iflow -p <<PROMPT>> --yolo'
-  # Dependency pre-installation; modify based on your sandbox image
   pre_init_cmds:
     - command: "apt-get update"
       timeout_seconds: 600
@@ -194,7 +141,6 @@ agent_config_common:
       timeout_seconds: 600
     - command: "apt-get install -y build-essential libc6-dev patch procps"
       timeout_seconds: 600
-    # Install helper tools like 'uv'    
     - command: "wget -q https://xrl-sandbox-bucket.oss-cn-hangzhou.aliyuncs.com/uv-files/uv-x86_64-unknown-linux-gnu.tar.gz && tar -xzf uv-x86_64-unknown-linux-gnu.tar.gz --strip-components=1 -C /usr/local/bin && uv --version"
       timeout_seconds: 600
   model_service_config:
@@ -203,7 +149,6 @@ agent_config_common:
   runtime_env_config:
     type: node
     npm_registry: "https://registry.npmmirror.com"
-    # you can install your own version
     custom_install_cmd: "wget --retry-connrefused --tries=10 --waitretry=2 -O ~/iflow-cli.tgz 'http://cloud.iflow.cn/iflow-cli/iflow-ai-iflow-cli-for-roll-0-4-4-v5.tgz' && npm i -g ~/iflow-cli.tgz"
   env:
     IFLOW_apiKey: "test"
@@ -212,29 +157,11 @@ agent_config_common:
     IFLOW_searchApiKey: "88888888"
     IFLOW_selectedAuthType: "openai-compatible"
     IFLOW_disableAutoUpdate: "true"
-    IFLOW_tokensLimit: "131073"
+    IFLOW_tokensLimit: "128000"
     IFLOW_shellTimeout: "360000"
     IFLOW_coreTools: "Edit,exit_plan_mode,glob,list_directory,multi_edit,plan,read plan,read_file,read_many_files,save_memory,Search,Shell,task,web_fetch,web_search,write_file,xml_escape"
 
-
 custom_envs:
-  RockTBNativeEnvTrain:
-    env_type: "rock_tb_native_env"
-    max_steps: ${max_actions_per_traj}
-    max_tokens_per_step: ${max_tokens_per_step}
-    env_manager_cls: ${env_manager_cls}
-    agent_system_template: "agent_system_template placeholder"
-    agent_template: "agent_template placeholder"
-    env_config:
-      dataset_name: /home/lxz/ROLL/data/swe_bench_verified_example.jsonl
-      tools: ~
-      max_steps: ${max_actions_per_traj}
-      mode: "train"
-      sandbox_base_url: http://10.212.70.196:8080 # change to your own service address if needed
-      user_id: "xxx"
-      experiment_id: "test_tb_native"
-      test_files: ["/raid/lxz/terminal-bench-datasets/datasets/swebench-verified"]
-      agent_config: ${agent_config_common}
   swebench_native_verified:
     env_type: "rock_tb_native_env"
     max_steps: ${max_actions_per_traj}
@@ -247,7 +174,10 @@ custom_envs:
       tools: ~
       max_steps: ${max_actions_per_traj}
       mode: "val"
-      sandbox_base_url: http://10.212.70.196:8080 # change to your own service address if needed
+      sandbox_base_url: http://10.212.70.196:8080
+      sandbox_memory: "2g"
+      sandbox_cpus: 1.0
+      # sandbox_limit_cpus: 1.0
       user_id: "xxx"
       experiment_id: "test_tb_native"
       test_files: ["/raid/lxz/terminal-bench-datasets/datasets/swebench-verified"]
