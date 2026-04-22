@@ -67,10 +67,43 @@ _VLLM_COUNTER_METRIC_SPECS = {
     },
 }
 
+_VLLM_COUNTER_RATE_METRIC_SPECS = {
+    "vllm:prompt_tokens_total": {
+        "snapshot_key": "vllm/prompt_tokens_rate_tps",
+        "sample_name": "vllm.prompt_tokens_rate_tps",
+        "unit": "tok/s",
+    },
+}
+
 _VLLM_REALTIME_SAMPLE_SPECS = {
+    "prompt_throughput_tps": {
+        "snapshot_key": "vllm/prompt_throughput_tps",
+        "sample_name": "vllm.prompt_throughput_tps",
+        "unit": "tok/s",
+    },
+    "generation_throughput_tps": {
+        "snapshot_key": "vllm/generation_throughput_tps",
+        "sample_name": "vllm.generation_throughput_tps",
+        "unit": "tok/s",
+    },
+    "prompt_tokens_rate_tps": {
+        "snapshot_key": "vllm/prompt_tokens_rate_tps",
+        "sample_name": "vllm.prompt_tokens_rate_tps",
+        "unit": "tok/s",
+    },
     "kv_cache_usage_perc": {
         "snapshot_key": "vllm/kv_cache_usage_perc_max",
         "sample_name": "vllm.kv_cache_usage_pct",
+        "unit": "%",
+    },
+    "kv_cache_cached_free_usage_perc": {
+        "snapshot_key": "vllm/kv_cache_cached_free_usage_perc_max",
+        "sample_name": "vllm.kv_cache_cached_free_usage_pct",
+        "unit": "%",
+    },
+    "kv_cache_resident_usage_perc": {
+        "snapshot_key": "vllm/kv_cache_resident_usage_perc_max",
+        "sample_name": "vllm.kv_cache_resident_usage_pct",
         "unit": "%",
     },
     "num_gpu_blocks_total": {
@@ -113,6 +146,11 @@ _VLLM_REALTIME_SAMPLE_SPECS = {
         "sample_name": "vllm.kv_cache_total_bytes",
         "unit": "bytes",
     },
+    "kv_cache_allocated_bytes": {
+        "snapshot_key": "vllm/kv_cache_allocated_bytes_max",
+        "sample_name": "vllm.kv_cache_allocated_bytes",
+        "unit": "bytes",
+    },
     "kv_cache_used_bytes": {
         "snapshot_key": "vllm/kv_cache_used_bytes_max",
         "sample_name": "vllm.kv_cache_used_bytes",
@@ -121,6 +159,11 @@ _VLLM_REALTIME_SAMPLE_SPECS = {
     "kv_cache_free_bytes": {
         "snapshot_key": "vllm/kv_cache_free_bytes_min",
         "sample_name": "vllm.kv_cache_free_bytes",
+        "unit": "bytes",
+    },
+    "kv_cache_reserved_bytes": {
+        "snapshot_key": "vllm/kv_cache_reserved_bytes_max",
+        "sample_name": "vllm.kv_cache_reserved_bytes",
         "unit": "bytes",
     },
     "num_requests_running": {
@@ -180,6 +223,14 @@ def _sample_metric_value(metric_name: str, raw_value: float) -> float:
     return value
 
 
+def _lmcache_enabled_from_config(vllm_config: dict) -> bool:
+    if "lmcache_config" in vllm_config:
+        return True
+    kv_transfer_config = vllm_config.get("kv_transfer_config")
+    kv_connector = getattr(kv_transfer_config, "kv_connector", None)
+    return isinstance(kv_connector, str) and kv_connector.startswith("LMCacheConnectorV1")
+
+
 class VllmStrategy(InferenceStrategy):
     strategy_name = "vllm"
 
@@ -192,12 +243,17 @@ class VllmStrategy(InferenceStrategy):
         self._metrics_task = None
         self._active_trace_steps: dict[int, int] = {}
         self._counter_last_values: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
+        self._counter_last_samples: dict[tuple[str, tuple[tuple[str, str], ...]], tuple[int, float]] = {}
         self._kv_snapshot_warning_emitted = False
+        self._lmcache_enabled = False
+        self._lmcache_reset_warning_emitted = False
+        self._engine_core_lmcache_invalidated = False
         self._agentic_kv_unload_active = False
 
     async def initialize(self, model_provider):
         set_seed(seed=self.worker.pipeline_config.seed)
         vllm_config = copy.deepcopy(self.worker_config.strategy_args.strategy_config)
+        self._lmcache_enabled = _lmcache_enabled_from_config(vllm_config)
         # Must explicitly set VLLM_USE_V1 to pass this check: https://github.com/vllm-project/vllm/pull/14972
         os.environ["VLLM_USE_V1"] = str(vllm_config.pop("VLLM_USE_V1", 1))
         self.sleep_level = vllm_config.pop("sleep_level", 1)
@@ -263,6 +319,7 @@ class VllmStrategy(InferenceStrategy):
             os.environ["VLLM_PORT"] = str(vllm_port)
 
         self.model = await create_async_llm(resource_placement_groups=self.worker_config.resource_placement_groups, **vllm_config)
+        self._sync_logger_trace_state()
 
 
         if Version("0.15.0") <= Version(vllm.__version__):
@@ -340,6 +397,7 @@ class VllmStrategy(InferenceStrategy):
             return None
         step = int(step)
         self._active_trace_steps[step] = self._active_trace_steps.get(step, 0) + 1
+        self._sync_logger_trace_state()
         return step
 
     def _deactivate_trace_step(self, step: Optional[int]) -> None:
@@ -348,8 +406,21 @@ class VllmStrategy(InferenceStrategy):
         remaining = self._active_trace_steps.get(step, 0) - 1
         if remaining > 0:
             self._active_trace_steps[step] = remaining
+            self._sync_logger_trace_state()
             return
         self._active_trace_steps.pop(step, None)
+        self._sync_logger_trace_state()
+
+    def _sync_logger_trace_state(self) -> None:
+        model = getattr(self, "model", None)
+        logger_manager = getattr(model, "logger_manager", None)
+        per_engine_logger_dict = getattr(logger_manager, "per_engine_logger_dict", {}) or {}
+        active_trace_steps = tuple(sorted(int(step) for step in self._active_trace_steps))
+        trace_component = f"{self.worker.worker_name}_metrics"
+        for stat_loggers in per_engine_logger_dict.values():
+            for stat_logger in stat_loggers:
+                setattr(stat_logger, "_roll_active_trace_steps", active_trace_steps)
+                setattr(stat_logger, "_roll_trace_component", trace_component)
 
     @staticmethod
     def _normalize_engine_snapshots(raw_snapshot) -> list[dict]:
@@ -380,6 +451,30 @@ class VllmStrategy(InferenceStrategy):
             snapshots.append(snapshot)
         return snapshots
 
+    @staticmethod
+    def _summarize_agentic_kv_snapshots(snapshots: list[dict]) -> Optional[dict]:
+        if not snapshots:
+            return None
+        total_blocks = sum(int(snapshot.get("num_gpu_blocks_total", 0) or 0) for snapshot in snapshots)
+        active_blocks = sum(int(snapshot.get("num_gpu_blocks_used", 0) or 0) for snapshot in snapshots)
+        free_cached_blocks = sum(int(snapshot.get("free_cached_block_count", 0) or 0) for snapshot in snapshots)
+        free_uncached_blocks = sum(int(snapshot.get("free_uncached_block_count", 0) or 0) for snapshot in snapshots)
+        kv_events = [dict(snapshot.get("kv_events") or {}) for snapshot in snapshots]
+        stored_block_count_total = sum(int(event.get("stored_block_count_total", 0) or 0) for event in kv_events)
+        removed_block_count_total = sum(int(event.get("removed_block_count_total", 0) or 0) for event in kv_events)
+        resident_usage_pct = 0.0
+        if total_blocks > 0:
+            resident_usage_pct = (active_blocks + free_cached_blocks) * 100.0 / total_blocks
+        return {
+            "total_blocks": total_blocks,
+            "active_blocks": active_blocks,
+            "free_cached_blocks": free_cached_blocks,
+            "free_uncached_blocks": free_uncached_blocks,
+            "stored_block_count_total": stored_block_count_total,
+            "removed_block_count_total": removed_block_count_total,
+            "resident_usage_pct": resident_usage_pct,
+        }
+
     async def _should_save_waiting_session(self) -> bool:
         if self._active_only_hbm_target() is not None:
             return True
@@ -389,6 +484,52 @@ class VllmStrategy(InferenceStrategy):
             return False
         free_uncached_blocks = min(int(snapshot.get("free_uncached_block_count", 0)) for snapshot in snapshots)
         return self._update_agentic_kv_pressure(free_uncached_blocks)
+
+    async def _maybe_log_agentic_kv_unload(
+        self,
+        *,
+        session_id: Optional[str],
+        request_id: Optional[str],
+        resume_point_id: Optional[str],
+        wait_reason: Optional[str],
+        before_snapshots: list[dict],
+    ) -> None:
+        before_summary = self._summarize_agentic_kv_snapshots(before_snapshots)
+        if before_summary is None:
+            return
+
+        after_snapshots = await self._collect_engine_core_kv_snapshots()
+        after_summary = self._summarize_agentic_kv_snapshots(after_snapshots)
+        if after_summary is None:
+            return
+
+        unloaded_blocks = max(
+            int(after_summary["removed_block_count_total"]) - int(before_summary["removed_block_count_total"]),
+            0,
+        )
+        if unloaded_blocks <= 0:
+            return
+
+        stored_blocks = max(
+            int(after_summary["stored_block_count_total"]) - int(before_summary["stored_block_count_total"]),
+            0,
+        )
+        logger.info(
+            "AgenticKV unload committed: session=%s, request=%s, resume_point=%s, wait_reason=%s, "
+            "unloaded %d GPU KV blocks, stored %d LMCache blocks, cold free %d -> %d, cached free %d -> %d, resident %.1f%% -> %.1f%%",
+            session_id,
+            request_id,
+            resume_point_id,
+            wait_reason,
+            unloaded_blocks,
+            stored_blocks,
+            int(before_summary["free_uncached_blocks"]),
+            int(after_summary["free_uncached_blocks"]),
+            int(before_summary["free_cached_blocks"]),
+            int(after_summary["free_cached_blocks"]),
+            float(before_summary["resident_usage_pct"]),
+            float(after_summary["resident_usage_pct"]),
+        )
 
     async def _evict_cached_free_blocks(self, target_free_cached_blocks: int) -> dict:
         if not hasattr(self.model, "call_engine_core_utility"):
@@ -569,9 +710,18 @@ class VllmStrategy(InferenceStrategy):
             agentic_kv = dict(payload.get("agentic_kv") or {})
             kv_transfer_params = dict(agentic_kv.get("request_configs") or {})
             save_on_wait = False
+            before_wait_snapshots: list[dict] = []
             active_only_hbm_target = self._active_only_hbm_target()
             if self._agentic_kv_enabled() and agentic_kv:
-                save_on_wait = await self._should_save_waiting_session()
+                if active_only_hbm_target is not None:
+                    save_on_wait = True
+                else:
+                    before_wait_snapshots = await self._collect_engine_core_kv_snapshots()
+                    if before_wait_snapshots:
+                        free_uncached_blocks = min(
+                            int(snapshot.get("free_uncached_block_count", 0)) for snapshot in before_wait_snapshots
+                        )
+                        save_on_wait = self._update_agentic_kv_pressure(free_uncached_blocks)
                 kv_transfer_params["lmcache.skip_save"] = not save_on_wait
             if kv_transfer_params:
                 sampling_params_payload = self._merge_kv_transfer_params(
@@ -621,23 +771,31 @@ class VllmStrategy(InferenceStrategy):
             evicted_cached_free_blocks = 0
             if (
                 save_on_wait
-                and active_only_hbm_target is not None
                 and agentic_kv.get("boundary_kind") == "request_end_tool_call"
                 and "stop" in finish_reasons
             ):
-                eviction_summary = await self._evict_cached_free_blocks(active_only_hbm_target)
-                evicted_cached_free_blocks = int(eviction_summary.get("evicted_blocks", 0) or 0)
-                if evicted_cached_free_blocks > 0:
-                    logger.info(
-                        "AgenticKV active-only eviction committed: session=%s, request=%s, resume_point=%s, "
-                        "evicted %d cached-free GPU KV blocks, cached free %d -> %d, target=%d",
-                        agentic_kv.get("session_id"),
-                        payload["rid"],
-                        agentic_kv.get("candidate_resume_point_id"),
-                        evicted_cached_free_blocks,
-                        int(eviction_summary.get("free_cached_before", 0) or 0),
-                        int(eviction_summary.get("free_cached_after", 0) or 0),
-                        int(eviction_summary.get("target_free_cached_blocks", active_only_hbm_target) or 0),
+                if active_only_hbm_target is not None:
+                    eviction_summary = await self._evict_cached_free_blocks(active_only_hbm_target)
+                    evicted_cached_free_blocks = int(eviction_summary.get("evicted_blocks", 0) or 0)
+                    if evicted_cached_free_blocks > 0:
+                        logger.info(
+                            "AgenticKV active-only eviction committed: session=%s, request=%s, resume_point=%s, "
+                            "evicted %d cached-free GPU KV blocks, cached free %d -> %d, target=%d",
+                            agentic_kv.get("session_id"),
+                            payload["rid"],
+                            agentic_kv.get("candidate_resume_point_id"),
+                            evicted_cached_free_blocks,
+                            int(eviction_summary.get("free_cached_before", 0) or 0),
+                            int(eviction_summary.get("free_cached_after", 0) or 0),
+                            int(eviction_summary.get("target_free_cached_blocks", active_only_hbm_target) or 0),
+                        )
+                elif before_wait_snapshots:
+                    await self._maybe_log_agentic_kv_unload(
+                        session_id=agentic_kv.get("session_id"),
+                        request_id=payload["rid"],
+                        resume_point_id=agentic_kv.get("candidate_resume_point_id"),
+                        wait_reason=agentic_kv.get("wait_reason", "tool_wait"),
+                        before_snapshots=before_wait_snapshots,
                     )
             response["agentic_kv"] = {
                 "session_id": agentic_kv.get("session_id"),
@@ -652,24 +810,44 @@ class VllmStrategy(InferenceStrategy):
         for id in request_ids:
             await self.model.abort(request_id=id)
 
+    async def _reset_engine_core_lmcache(self, reason: str, *, force: bool = False) -> None:
+        if not self._lmcache_enabled:
+            return
+        if self._engine_core_lmcache_invalidated and not force:
+            return
+        if not hasattr(self.model, "call_engine_core_utility"):
+            return
+        try:
+            await self.model.call_engine_core_utility("roll_reset_lmcache_engine", reason)
+            self._engine_core_lmcache_invalidated = True
+        except Exception as exc:
+            if not self._lmcache_reset_warning_emitted:
+                logger.warning(f"Failed to reset engine-core LMCache connector: {exc}")
+                self._lmcache_reset_warning_emitted = True
+
     # offload/reload 接口
     async def load_states(self, *args, **kwargs):
         await self.model.reset_prefix_cache()
         if not self.is_model_in_gpu:
             await self.model.load_states()
             self.is_model_in_gpu = True
+        self._engine_core_lmcache_invalidated = False
 
     async def offload_states(self, include=None, non_blocking=False):
         await self.model.reset_prefix_cache()
+        await self._reset_engine_core_lmcache("offload_states", force=True)
         if include is None or OffloadStateType.model_params in include:
             if self.is_model_in_gpu and self.worker.pipeline_config.is_actor_infer_colocated:
                 await self.model.offload_states(self.sleep_level)
                 self.is_model_in_gpu = False
+        self._engine_core_lmcache_invalidated = False
         gc.collect()
         current_platform.empty_cache()
     
     async def process_weights_after_loading(self,*args, **kwargs):
+        await self._reset_engine_core_lmcache("weight update")
         await self.model.process_weights_after_loading()
+        self._engine_core_lmcache_invalidated = False
 
     # 参数同步相关接口
     async def setup_collective_group(self, master_address, master_port, rank_offset, world_size, group_name, backend=None):
@@ -678,13 +856,16 @@ class VllmStrategy(InferenceStrategy):
         await self.model.setup_collective_group(master_address, master_port, rank_offset, world_size, group_name, backend)
 
     async def broadcast_parameter(self, names, dtypes, shapes, group_name, is_lora=False):
+        await self._reset_engine_core_lmcache("weight update")
         await self.model.broadcast_parameter(names, dtypes, shapes, group_name, is_lora)
 
     async def update_parameter_in_bucket(self, serialized_named_tensors, is_lora=False):
+        await self._reset_engine_core_lmcache("weight update")
         await self.model.update_parameter_in_bucket(serialized_named_tensors, is_lora)
 
     async def add_lora(self, peft_config):
         peft_config["target_modules"] = set(self.worker_config.model_args.lora_target)
+        await self._reset_engine_core_lmcache("add_lora")
         await self.model.add_lora(peft_config)
 
     async def _collect_metrics_snapshot(self):
@@ -767,6 +948,42 @@ class VllmStrategy(InferenceStrategy):
                                 timestamp_ns=timestamp_ns,
                                 attrs=attrs,
                             )
+                    continue
+
+                if metric.name in _VLLM_COUNTER_RATE_METRIC_SPECS:
+                    spec = _VLLM_COUNTER_RATE_METRIC_SPECS[metric.name]
+                    identity = _metric_identity(metric)
+                    current_value = float(metric.value)
+                    previous_sample = self._counter_last_samples.get(identity)
+                    rate_value = 0.0
+                    if previous_sample is not None:
+                        previous_timestamp_ns, previous_value = previous_sample
+                        elapsed_seconds = max((timestamp_ns - previous_timestamp_ns) / 1_000_000_000, 0.0)
+                        if elapsed_seconds > 0:
+                            rate_value = max(current_value - previous_value, 0.0) / elapsed_seconds
+                    self._counter_last_samples[identity] = (timestamp_ns, current_value)
+                    snapshot[spec["snapshot_key"]] = snapshot.get(spec["snapshot_key"], 0.0) + rate_value
+                    continue
+
+            for metric_name, spec in _VLLM_COUNTER_RATE_METRIC_SPECS.items():
+                if spec["snapshot_key"] not in snapshot:
+                    continue
+                sample_value = float(snapshot[spec["snapshot_key"]])
+                if active_trace_steps:
+                    attrs = {
+                        "source": "prometheus_counter",
+                        "aggregation": "sum",
+                        "metric_name": metric_name,
+                    }
+                    for step in active_trace_steps:
+                        tracer.record_sample(
+                            spec["sample_name"],
+                            sample_value,
+                            unit=spec["unit"],
+                            step=step,
+                            timestamp_ns=timestamp_ns,
+                            attrs=attrs,
+                        )
             self._metrics_snapshots.append(snapshot)
 
             await asyncio.sleep(self._metrics_snapshot_interval)

@@ -76,6 +76,20 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
             return 0
         return int(getattr(cache, "step", 0))
 
+    def _finish_akv_session_if_needed(self, rollout_cache: Optional[RolloutCache] = None) -> None:
+        if not self.akv_runtime.enabled:
+            return
+        cache = rollout_cache if rollout_cache is not None else getattr(self, "rollout_cache", None)
+        if cache is None or not getattr(cache, "terminated", False):
+            return
+        history = getattr(cache, "history", None) or []
+        if not history:
+            return
+        session_id = history[-1].get("akv_session_id") or history[0].get("akv_session_id")
+        if session_id is None:
+            return
+        self.akv_runtime.finish_session(session_id)
+
     def _build_step_trace_attrs(self, *, episode_id: Optional[int], traj_id: Optional[str], env_step: int) -> dict[str, Any]:
         return {
             "env_id": self.env_config["env_id"],
@@ -348,9 +362,6 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
         tracer = get_trace_manager(component=f"env_{env_id}")
         _base_attrs = {"env_id": env_id, "tag": tag, "group_id": group_id, "mode": mode}
 
-        def _make_traj_id(episode_id):
-            return f"{tag}_{group_id}_{episode_id}_{env_id}"
-
         with Timer(name="reset", logger=None) as reset_timer:
             _reset_span = tracer.span("env.reset", phase="env", attrs={**_base_attrs})
             _reset_span.__enter__()
@@ -358,7 +369,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
             # Add episode_id to reset span after reset() completes
             if hasattr(self, 'episode_id') and self.episode_id is not None:
                 _reset_span.set_attribute("episode_id", self.episode_id)
-                _reset_span.set_attribute("traj_id", _make_traj_id(self.episode_id))
+                _reset_span.set_attribute("traj_id", self._make_traj_id(self.episode_id))
             _reset_span.__exit__(None, None, None)
         self.log_stats["reset_time"] = round(reset_timer.last, 4)
         start_step = self.current_step
@@ -377,7 +388,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
 
                     rollout: DataProto = self.create_placeholder_rollout(self.episode_id)
                     rollout.meta_info["drop_flag"] = True
-                    failed_traj_id = _make_traj_id(self.episode_id) if getattr(self, 'episode_id', None) is not None else None
+                    failed_traj_id = self._make_traj_id(self.episode_id) if getattr(self, 'episode_id', None) is not None else None
                     _put_span = tracer.span(
                         "rollout.put_batch",
                         phase="rollout",
@@ -409,7 +420,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                         rollout_cache = self.reset()
                         if hasattr(self, 'episode_id') and self.episode_id is not None:
                             _reset_span.set_attribute("episode_id", self.episode_id)
-                            _reset_span.set_attribute("traj_id", _make_traj_id(self.episode_id))
+                            _reset_span.set_attribute("traj_id", self._make_traj_id(self.episode_id))
                         _reset_span.__exit__(None, None, None)
                     self.log_stats["reset_time"] = round(reset_timer.last, 4)
                     start_step = self.current_step
@@ -417,7 +428,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
 
                 max_reset_retries = 0
                 episode_id = getattr(self, 'episode_id', None)
-                traj_id = _make_traj_id(episode_id) if episode_id is not None else None
+                traj_id = self._make_traj_id(episode_id) if episode_id is not None else None
                 if trajectory_span is None:
                     trajectory_span = tracer.span(
                         "trajectory.lifetime",
@@ -492,9 +503,10 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                     _trajectory_step_span.__exit__(None, None, None)
 
                 if self.running and rollout_cache.terminated:
+                    self._finish_akv_session_if_needed(rollout_cache)
                     rollout = self.formulate_rollouts(rollout_cache)
-                    traj_group_id = f"{self.rollout_cache.tag}_{self.rollout_cache.group_id}_{self.episode_id}_{self.group_seed}"
-                    traj_id = f"{traj_group_id}_{self.rollout_cache.env_id}"
+                    traj_group_id = self._make_traj_group_id(self.episode_id)
+                    traj_id = self._make_traj_id(self.episode_id)
                     rollout.non_tensor_batch["traj_group_id"] = np.array([traj_group_id] * rollout.batch.batch_size[0], dtype=object)
                     rollout.non_tensor_batch["traj_id"] = np.array([traj_id] * rollout.batch.batch_size[0], dtype=object)
                     _put_span = tracer.span(

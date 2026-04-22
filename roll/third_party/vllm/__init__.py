@@ -1,3 +1,4 @@
+import logging
 import os
 import pathlib
 import json
@@ -59,6 +60,51 @@ def _stringify_lmcache_env_value(value):
     return str(value)
 
 
+def _configure_vllm_logging(kwargs: Dict) -> None:
+    log_level = kwargs.pop("log_level", None)
+    stats_log_interval = kwargs.pop("stats_log_interval", None)
+
+    if stats_log_interval is not None:
+        normalized_interval = str(stats_log_interval).strip()
+        try:
+            interval_value = float(normalized_interval)
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"Invalid vLLM stats_log_interval {stats_log_interval!r}; expected a positive number of seconds"
+            ) from e
+
+        if interval_value <= 0:
+            raise ValueError(
+                f"Invalid vLLM stats_log_interval {stats_log_interval!r}; expected a positive number of seconds"
+            )
+
+        os.environ["VLLM_LOG_STATS_INTERVAL"] = normalized_interval
+
+    if log_level is None:
+        return
+
+    normalized = str(log_level).strip().upper()
+    aliases = {
+        "WARN": "WARNING",
+        "FATAL": "CRITICAL",
+    }
+    normalized = aliases.get(normalized, normalized)
+
+    level_value = getattr(logging, normalized, None)
+    if not isinstance(level_value, int):
+        raise ValueError(
+            f"Invalid vLLM log_level {log_level!r}; expected one of "
+            "'debug', 'info', 'warning', 'error', 'critical'"
+        )
+
+    os.environ["VLLM_LOGGING_LEVEL"] = normalized
+
+    vllm_logger = logging.getLogger("vllm")
+    vllm_logger.setLevel(level_value)
+    for handler in vllm_logger.handlers:
+        handler.setLevel(level_value)
+
+
 def _configure_lmcache(kwargs: Dict) -> bool:
     lmcache_config = kwargs.pop("lmcache_config", None)
     if lmcache_config is None:
@@ -91,10 +137,17 @@ def _configure_lmcache(kwargs: Dict) -> bool:
     if not engine_id:
         engine_id = f"roll-lmcache-{uuid.uuid4().hex}"
 
+    kv_connector_extra_config = dict(lmcache_config.get("kv_connector_extra_config", {}))
+    for key, value in lmcache_config.items():
+        if key in lmcache_transfer_keys:
+            continue
+        prefixed_key = f"lmcache.{key}"
+        kv_connector_extra_config.setdefault(prefixed_key, value)
+
     kwargs["kv_transfer_config"] = KVTransferConfig(
         kv_connector=lmcache_config.get("kv_connector", "LMCacheConnectorV1Dynamic"),
         kv_role=lmcache_config.get("kv_role", "kv_both"),
-        kv_connector_extra_config=lmcache_config.get("kv_connector_extra_config", {}),
+        kv_connector_extra_config=kv_connector_extra_config,
         kv_connector_module_path=lmcache_config.get(
             "kv_connector_module_path", "lmcache.integration.vllm.lmcache_connector_v1"
         ),
@@ -108,6 +161,7 @@ def _configure_lmcache(kwargs: Dict) -> bool:
 
 async def create_async_llm(resource_placement_groups: List[Dict], **kwargs):
     kwargs["enable_sleep_mode"] = True
+    _configure_vllm_logging(kwargs)
     _configure_lmcache(kwargs)
     patch_vllm_engine_core_inspection()
 
