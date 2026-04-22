@@ -1,8 +1,11 @@
 #!/bin/bash
 set +x
 
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 CONFIG_PATH=$(basename $(dirname $0))
-export PYTHONPATH="$PWD:$PYTHONPATH"
+cd "$REPO_ROOT" || exit 1
+export PYTHONPATH="$REPO_ROOT:$PYTHONPATH"
 export ROLL_TRACE_ENABLE=1
 export ROLL_TRACE_DIR=./output/traces/native_roll
 export ROLL_TRACE_EXPORT_HTML=1
