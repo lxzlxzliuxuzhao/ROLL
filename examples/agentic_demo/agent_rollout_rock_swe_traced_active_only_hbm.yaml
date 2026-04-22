@@ -1,0 +1,13 @@
+defaults:
+  - agent_rollout_rock_swe_traced
+  - _self_
+
+exp_name: "agentic_rollout_swe_active_only_hbm"
+
+agentic_kv:
+  enable: true
+  free_gpu_blocks_low_watermark: null
+  free_gpu_blocks_high_watermark: null
+  # Active-only HBM mode: save on tool-wait boundary, then proactively evict
+  # cached-free GPU KV blocks so HBM keeps mostly active KV.
+  max_cached_free_blocks: 0
