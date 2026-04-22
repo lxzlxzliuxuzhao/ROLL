@@ -188,11 +188,17 @@ class AgenticKVConfig:
     enable: bool = field(default=False, metadata={"help": "Enable agentic KV semantic session layer."})
     free_gpu_blocks_low_watermark: Optional[int] = field(
         default=None,
-        metadata={"help": "Low watermark for free GPU blocks used by agentic KV unload hysteresis."},
+        metadata={"help": "Low watermark for cold free GPU blocks used by agentic KV unload hysteresis."},
     )
     free_gpu_blocks_high_watermark: Optional[int] = field(
         default=None,
-        metadata={"help": "High watermark for free GPU blocks used by agentic KV unload hysteresis."},
+        metadata={"help": "High watermark for cold free GPU blocks used by agentic KV unload hysteresis."},
+    )
+    max_cached_free_blocks: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "When set, proactively evict free cached GPU KV blocks after tool-wait save until cached free blocks are <= this target. Set to 0 for active-only HBM mode."
+        },
     )
 
     def __post_init__(self):
@@ -204,6 +210,8 @@ class AgenticKVConfig:
             )
         if low is not None and high is not None:
             FreeBlockWatermark(low=low, high=high)
+        if self.max_cached_free_blocks is not None and self.max_cached_free_blocks < 0:
+            raise ValueError("max_cached_free_blocks must be >= 0")
 
 
 @dataclass

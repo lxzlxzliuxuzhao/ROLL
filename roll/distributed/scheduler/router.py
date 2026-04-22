@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import itertools
 import math
 import time
@@ -593,6 +594,10 @@ class RouterClient:
             case _:
                 raise NotImplementedError(f"strategy {self.strategy_name} is not supported")
 
+        agentic_kv = req.meta_info.get("agentic_kv")
+        if agentic_kv is not None:
+            payload["agentic_kv"] = copy.deepcopy(agentic_kv)
+
         for key in ("trace_step", "trace_request_id", "trace_sample_id", "trace_traj_id", "trace_env_step"):
             value = req.meta_info.get(key)
             if value is not None:
@@ -608,6 +613,8 @@ class RouterClient:
         output_data.meta_info["vllm_phase_timing"] = response.get("vllm_phase_timing")
         output_data.meta_info["eos_token_id"] = [self.eos_token_id, self.pad_token_id]
         output_data.meta_info["pad_token_id"] = self.pad_token_id
+        if "agentic_kv" in response:
+            output_data.meta_info["agentic_kv"] = response["agentic_kv"]
         return output_data
 
     async def generate_request(self, req: DataProto, request_id, uid):

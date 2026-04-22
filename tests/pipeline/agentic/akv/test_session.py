@@ -203,3 +203,8 @@ def test_agentic_kv_config_watermark_validation(low, high):
             free_gpu_blocks_low_watermark=low,
             free_gpu_blocks_high_watermark=high,
         )
+
+
+def test_agentic_kv_config_rejects_negative_cached_free_target():
+    with pytest.raises(ValueError):
+        AgenticKVConfig(max_cached_free_blocks=-1)

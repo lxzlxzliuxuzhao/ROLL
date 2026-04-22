@@ -193,6 +193,7 @@ class VllmStrategy(InferenceStrategy):
         self._active_trace_steps: dict[int, int] = {}
         self._counter_last_values: dict[tuple[str, tuple[tuple[str, str], ...]], float] = {}
         self._kv_snapshot_warning_emitted = False
+        self._agentic_kv_unload_active = False
 
     async def initialize(self, model_provider):
         set_seed(seed=self.worker.pipeline_config.seed)
@@ -293,6 +294,47 @@ class VllmStrategy(InferenceStrategy):
         phase_timing = getattr(output, "roll_phase_timing", None)
         return dict(phase_timing) if isinstance(phase_timing, dict) else None
 
+    def _merge_kv_transfer_params(self, sampling_params: Dict, kv_transfer_params: Dict) -> Dict:
+        merged = dict(sampling_params)
+        extra_args = dict(merged.get("extra_args") or {})
+        merged_kv_transfer_params = dict(extra_args.get("kv_transfer_params") or {})
+        merged_kv_transfer_params.update(kv_transfer_params)
+        extra_args["kv_transfer_params"] = merged_kv_transfer_params
+        merged["extra_args"] = extra_args
+        return merged
+
+    def _agentic_kv_config(self):
+        worker = getattr(self, "worker", None)
+        pipeline_config = getattr(worker, "pipeline_config", None)
+        return getattr(pipeline_config, "agentic_kv", None)
+
+    def _agentic_kv_enabled(self) -> bool:
+        agentic_kv = self._agentic_kv_config()
+        return bool(agentic_kv and getattr(agentic_kv, "enable", False))
+
+    def _active_only_hbm_target(self) -> Optional[int]:
+        agentic_kv = self._agentic_kv_config()
+        if agentic_kv is None:
+            return None
+        target = getattr(agentic_kv, "max_cached_free_blocks", None)
+        return None if target is None else int(target)
+
+    def _update_agentic_kv_pressure(self, free_uncached_blocks: int) -> bool:
+        agentic_kv = self._agentic_kv_config()
+        if agentic_kv is None:
+            return False
+
+        low = getattr(agentic_kv, "free_gpu_blocks_low_watermark", None)
+        high = getattr(agentic_kv, "free_gpu_blocks_high_watermark", None)
+        if low is None or high is None:
+            return False
+
+        if self._agentic_kv_unload_active:
+            self._agentic_kv_unload_active = free_uncached_blocks < high
+        else:
+            self._agentic_kv_unload_active = free_uncached_blocks < low
+        return self._agentic_kv_unload_active
+
     def _activate_trace_step(self, step: Optional[int]) -> Optional[int]:
         if step is None:
             return None
@@ -337,6 +379,50 @@ class VllmStrategy(InferenceStrategy):
             snapshot["engine"] = str(snapshot.get("engine", engine_index))
             snapshots.append(snapshot)
         return snapshots
+
+    async def _should_save_waiting_session(self) -> bool:
+        if self._active_only_hbm_target() is not None:
+            return True
+
+        snapshots = await self._collect_engine_core_kv_snapshots()
+        if not snapshots:
+            return False
+        free_uncached_blocks = min(int(snapshot.get("free_uncached_block_count", 0)) for snapshot in snapshots)
+        return self._update_agentic_kv_pressure(free_uncached_blocks)
+
+    async def _evict_cached_free_blocks(self, target_free_cached_blocks: int) -> dict:
+        if not hasattr(self.model, "call_engine_core_utility"):
+            return {
+                "available": False,
+                "evicted_blocks": 0,
+                "free_cached_before": 0,
+                "free_cached_after": 0,
+                "target_free_cached_blocks": target_free_cached_blocks,
+            }
+
+        raw_result = await self.model.call_engine_core_utility(
+            "roll_evict_cached_free_blocks",
+            target_free_cached_blocks,
+        )
+        results = self._normalize_engine_snapshots(raw_result)
+        evicted_blocks = 0
+        free_cached_before = 0
+        free_cached_after = 0
+        available = False
+        for result in results:
+            if not result.get("available", False):
+                continue
+            available = True
+            evicted_blocks += int(result.get("evicted_blocks", 0) or 0)
+            free_cached_before += int(result.get("free_cached_before", 0) or 0)
+            free_cached_after += int(result.get("free_cached_after", 0) or 0)
+        return {
+            "available": available,
+            "evicted_blocks": evicted_blocks,
+            "free_cached_before": free_cached_before,
+            "free_cached_after": free_cached_after,
+            "target_free_cached_blocks": target_free_cached_blocks,
+        }
 
     async def generate(self, batch: DataProto, generation_config) -> torch.Tensor:
         # Check if beam search is requested
@@ -479,9 +565,22 @@ class VllmStrategy(InferenceStrategy):
 
         trace_step = self._activate_trace_step(payload.get("trace_step"))
         try:
+            sampling_params_payload = dict(payload["sampling_params"])
+            agentic_kv = dict(payload.get("agentic_kv") or {})
+            kv_transfer_params = dict(agentic_kv.get("request_configs") or {})
+            save_on_wait = False
+            active_only_hbm_target = self._active_only_hbm_target()
+            if self._agentic_kv_enabled() and agentic_kv:
+                save_on_wait = await self._should_save_waiting_session()
+                kv_transfer_params["lmcache.skip_save"] = not save_on_wait
+            if kv_transfer_params:
+                sampling_params_payload = self._merge_kv_transfer_params(
+                    sampling_params_payload,
+                    kv_transfer_params,
+                )
             result_generator = self.model.generate(
                 prompt=prompt,
-                sampling_params=SamplingParams(**payload["sampling_params"]),
+                sampling_params=SamplingParams(**sampling_params_payload),
                 request_id=payload["rid"],
                 lora_request=lora_request,
             )
@@ -512,12 +611,42 @@ class VllmStrategy(InferenceStrategy):
                         for token_id, lps in zip(completion_output.token_ids, completion_output.logprobs)
                     ]
                 )
-        return {
+        response = {
             "output_token_ids": output_token_ids,
             "finish_reasons": finish_reasons,
             "output_logprobs": logprobs,
             "vllm_phase_timing": phase_timing,
         }
+        if self._agentic_kv_enabled() and agentic_kv:
+            evicted_cached_free_blocks = 0
+            if (
+                save_on_wait
+                and active_only_hbm_target is not None
+                and agentic_kv.get("boundary_kind") == "request_end_tool_call"
+                and "stop" in finish_reasons
+            ):
+                eviction_summary = await self._evict_cached_free_blocks(active_only_hbm_target)
+                evicted_cached_free_blocks = int(eviction_summary.get("evicted_blocks", 0) or 0)
+                if evicted_cached_free_blocks > 0:
+                    logger.info(
+                        "AgenticKV active-only eviction committed: session=%s, request=%s, resume_point=%s, "
+                        "evicted %d cached-free GPU KV blocks, cached free %d -> %d, target=%d",
+                        agentic_kv.get("session_id"),
+                        payload["rid"],
+                        agentic_kv.get("candidate_resume_point_id"),
+                        evicted_cached_free_blocks,
+                        int(eviction_summary.get("free_cached_before", 0) or 0),
+                        int(eviction_summary.get("free_cached_after", 0) or 0),
+                        int(eviction_summary.get("target_free_cached_blocks", active_only_hbm_target) or 0),
+                    )
+            response["agentic_kv"] = {
+                "session_id": agentic_kv.get("session_id"),
+                "save_on_wait": save_on_wait,
+                "evicted_cached_free_blocks": evicted_cached_free_blocks,
+            }
+        elif agentic_kv:
+            response["agentic_kv"] = dict(agentic_kv)
+        return response
 
     async def abort_requests(self, request_ids):
         for id in request_ids:

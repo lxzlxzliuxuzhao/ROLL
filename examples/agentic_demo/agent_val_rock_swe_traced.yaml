@@ -33,6 +33,12 @@ tracing:
 
 pipeline_cls: roll.pipeline.agentic.traced_agentic_pipeline.TracedAgenticPipeline
 
+agentic_kv:
+  enable: true
+  # Active-only HBM experiment: save on tool-wait boundaries, then evict
+  # cached-free GPU KV blocks so resume goes through LMCache reload.
+  max_cached_free_blocks: 0
+
 num_gpus_per_node: 8
 rpc_timeout: 72000
 

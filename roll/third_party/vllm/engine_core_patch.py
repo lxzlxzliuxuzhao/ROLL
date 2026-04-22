@@ -31,6 +31,41 @@ def _count_free_block_states(block_pool) -> tuple[int, int]:
     return free_cached_blocks, free_uncached_blocks
 
 
+def _evict_free_cached_blocks(block_pool, target_free_cached_blocks: int = 0) -> dict[str, int]:
+    target_free_cached_blocks = max(int(target_free_cached_blocks), 0)
+    free_cached_before, _ = _count_free_block_states(block_pool)
+    if not getattr(block_pool, "enable_caching", False) or free_cached_before <= target_free_cached_blocks:
+        return {
+            "target_free_cached_blocks": target_free_cached_blocks,
+            "free_cached_before": free_cached_before,
+            "free_cached_after": free_cached_before,
+            "evicted_blocks": 0,
+        }
+
+    evicted_blocks = 0
+    remaining_cached = free_cached_before
+    for block in getattr(block_pool, "blocks", []) or []:
+        if remaining_cached <= target_free_cached_blocks:
+            break
+        if getattr(block, "is_null", False):
+            continue
+        if int(getattr(block, "ref_cnt", 0) or 0) != 0:
+            continue
+        if getattr(block, "block_hash", None) is None:
+            continue
+        if block_pool._maybe_evict_cached_block(block):
+            evicted_blocks += 1
+            remaining_cached -= 1
+
+    free_cached_after, _ = _count_free_block_states(block_pool)
+    return {
+        "target_free_cached_blocks": target_free_cached_blocks,
+        "free_cached_before": free_cached_before,
+        "free_cached_after": free_cached_after,
+        "evicted_blocks": evicted_blocks,
+    }
+
+
 def _int_attr(obj: Any, attr: str) -> int:
     return int(getattr(obj, attr, 0) or 0)
 
@@ -338,7 +373,28 @@ def patch_vllm_engine_core_inspection() -> None:
             "kv_events": kv_events,
         }
 
+    def roll_evict_cached_free_blocks(self, target_free_cached_blocks: int = 0) -> dict[str, Any]:
+        scheduler = getattr(self, "scheduler", None)
+        if scheduler is None:
+            return {"available": False, "reason": "missing_scheduler"}
+
+        kv_cache_manager = getattr(scheduler, "kv_cache_manager", None)
+        if kv_cache_manager is None:
+            return {"available": False, "reason": "missing_kv_cache_manager"}
+
+        block_pool = getattr(kv_cache_manager, "block_pool", None)
+        if block_pool is None:
+            return {"available": False, "reason": "missing_block_pool"}
+
+        summary = _evict_free_cached_blocks(block_pool, target_free_cached_blocks=target_free_cached_blocks)
+        return {
+            "available": True,
+            **summary,
+        }
+
     setattr(EngineCore, "roll_get_kv_cache_snapshot", roll_get_kv_cache_snapshot)
     setattr(EngineCoreProc, "roll_get_kv_cache_snapshot", roll_get_kv_cache_snapshot)
+    setattr(EngineCore, "roll_evict_cached_free_blocks", roll_evict_cached_free_blocks)
+    setattr(EngineCoreProc, "roll_evict_cached_free_blocks", roll_evict_cached_free_blocks)
     setattr(EngineCoreProc, "_roll_kv_inspection_patched", True)
     setattr(EngineCore, "_roll_kv_inspection_patched", True)
