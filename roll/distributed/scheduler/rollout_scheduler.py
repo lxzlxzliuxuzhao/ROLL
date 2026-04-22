@@ -623,6 +623,9 @@ class RolloutScheduler(RolloutMockMixin):
         await self.router_manager.abort_all.remote()
         await self.router_manager.wait_complete.remote()
 
+    async def flush_traces(self, step: Optional[int] = None):
+        await asyncio.gather(*self.es_manager.flush_traces(step, blocking=False))
+
     async def _run_rollout_loop(self, seed):
         await asyncio.gather(*self.es_manager.run_rollout_loop(seed, blocking=False))
 

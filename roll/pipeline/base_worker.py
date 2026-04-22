@@ -28,6 +28,7 @@ from roll.utils.dynamic_batching import make_mini_batch_iter_for_dynamic_batchin
 from roll.utils.functionals import agg_loss, append_to_dict, compute_approx_kl, flatten_sum, masked_mean, postprocess_generate, reduce_metrics
 from roll.utils.offload_nccl import reload_process_groups
 from roll.utils.offload_states import OffloadStateType
+from roll.utils.tracing import flush_trace_managers
 
 
 class ActorWorker(Worker):
@@ -536,6 +537,10 @@ class InferWorker(Worker):
     async def process_weights_after_loading(self):
         if getattr(self, "strategy", None) is not None:
             await self.strategy.process_weights_after_loading()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    async def flush_traces(self, step: Optional[int] = None):
+        flush_trace_managers(step=step)
 
 
 class CriticWorker(Worker):

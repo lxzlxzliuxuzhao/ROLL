@@ -37,6 +37,27 @@ _STAGE_GROUP_LABELS = {
 }
 
 _METRIC_SERIES_SPECS = {
+    "vllm.prompt_throughput_tps": {
+        "series_id": "vllm_prompt_throughput_tps",
+        "series_label": "Prompt 吞吐量",
+        "series_group": "Throughput",
+        "description": "按当前采样时刻聚合的 prompt tokens/s。它优先直接读取 vLLM LoggingStatLogger 的内部吞吐窗口，比周期性 stats log 更接近瞬时值。",
+        "render": "line",
+    },
+    "vllm.generation_throughput_tps": {
+        "series_id": "vllm_generation_throughput_tps",
+        "series_label": "Generation 吞吐量",
+        "series_group": "Throughput",
+        "description": "按当前采样时刻聚合的 generation tokens/s。它优先直接读取 vLLM LoggingStatLogger 的内部吞吐窗口，比周期性 stats log 更接近瞬时值。",
+        "render": "line",
+    },
+    "vllm.prompt_tokens_rate_tps": {
+        "series_id": "vllm_prompt_tokens_rate_tps",
+        "series_label": "Prompt Token Rate",
+        "series_group": "Throughput",
+        "description": "基于 Prometheus counter vllm:prompt_tokens_total 相邻两次采样差分得到的即时速率，单位是 tokens/s。",
+        "render": "line",
+    },
     "vllm.kv_cache_usage_pct": {
         "series_id": "vllm_kv_cache_usage_pct",
         "series_label": "KV Cache 使用率",
@@ -44,11 +65,25 @@ _METRIC_SERIES_SPECS = {
         "description": "vLLM engine-core 里 block pool 的实时使用率。这里展示的是 step 内真实的 KV block 占用，不是 gpu_memory_utilization 预留上限。",
         "render": "step",
     },
+    "vllm.kv_cache_cached_free_usage_pct": {
+        "series_id": "vllm_kv_cache_cached_free_usage_pct",
+        "series_label": "可驱逐 KV 使用率",
+        "series_group": "KV Cache",
+        "description": "当前 free cached blocks 占可调度 block 总数的比例。它反映已经不再被活跃请求持有、但仍驻留在 HBM 里等待复用或驱逐的 KV 占比。",
+        "render": "step",
+    },
+    "vllm.kv_cache_resident_usage_pct": {
+        "series_id": "vllm_kv_cache_resident_usage_pct",
+        "series_label": "KV 驻留使用率",
+        "series_group": "KV Cache",
+        "description": "active blocks 加 free cached blocks 的合计占比。它表示当前仍实际驻留在 HBM 里的 KV footprint，包括活跃占用和可驱逐缓存。",
+        "render": "step",
+    },
     "vllm.kv_blocks_total": {
         "series_id": "vllm_kv_blocks_total",
-        "series_label": "KV 可用 Block 总数",
+        "series_label": "KV 可调度 Block 总数",
         "series_group": "KV Cache",
-        "description": "当前 engine 的可用 KV block 总容量，直接读取 block pool。",
+        "description": "当前 scheduler 真正可以分配给请求的 KV block 总数，已经扣除了 block pool 里的 null block。",
         "render": "step",
     },
     "vllm.kv_blocks_used": {
@@ -95,23 +130,37 @@ _METRIC_SERIES_SPECS = {
     },
     "vllm.kv_cache_total_bytes": {
         "series_id": "vllm_kv_cache_total_bytes",
-        "series_label": "KV 总容量",
+        "series_label": "KV 可调度总容量",
         "series_group": "KV Cache",
-        "description": "按照 bytes_per_block 乘 block 总数得到的 KV 实际总容量。",
+        "description": "按照可调度 block 数乘每 block 字节数得到的请求可用 KV 容量，不包含 null block，也不包含多 rank 对齐后未参与调度的尾部张量。",
+        "render": "step",
+    },
+    "vllm.kv_cache_allocated_bytes": {
+        "series_id": "vllm_kv_cache_allocated_bytes",
+        "series_label": "KV 张量总容量",
+        "series_group": "KV Cache",
+        "description": "直接累加 kv_cache_tensors.size 得到的已分配 KV 张量总字节数。它包含 null block 对应的保留空间，以及多 rank 对齐后仍留在张量尾部的未调度空间。",
         "render": "step",
     },
     "vllm.kv_cache_used_bytes": {
         "series_id": "vllm_kv_cache_used_bytes",
-        "series_label": "KV 已用容量",
+        "series_label": "KV 活跃占用容量",
         "series_group": "KV Cache",
-        "description": "按照已用 block 数计算的 KV 实际占用容量。",
+        "description": "按照 ref_cnt>0 的活跃 block 数计算的 KV 占用容量，只统计当前真正被请求持有的部分。",
         "render": "step",
     },
     "vllm.kv_cache_free_bytes": {
         "series_id": "vllm_kv_cache_free_bytes",
-        "series_label": "KV 空闲容量",
+        "series_label": "KV 可调度空闲容量",
         "series_group": "KV Cache",
-        "description": "按照空闲 block 数计算的 KV 剩余容量。",
+        "description": "按照 free queue 中 block 数计算的可调度空闲容量。它与活跃占用容量之和等于“KV 可调度总容量”。",
+        "render": "step",
+    },
+    "vllm.kv_cache_reserved_bytes": {
+        "series_id": "vllm_kv_cache_reserved_bytes",
+        "series_label": "KV 保留/未调度容量",
+        "series_group": "KV Cache",
+        "description": "已分配张量中暂时不会出现在 scheduler block pool 里的部分。通常至少包含 null block 对应的保留空间；多 rank 对齐到最小 num_blocks 时，还会额外包含张量尾部未参与调度的空间。",
         "render": "step",
     },
     "vllm.num_requests_waiting": {
@@ -149,6 +198,41 @@ _METRIC_SERIES_SPECS = {
         "description": "每个采样周期内新命中的 prefix cache token 数，直接记录在 KVCacheManager 查询路径。",
         "render": "step",
     },
+    "vllm.prefix_cache_hit_rate_delta_pct": {
+        "series_id": "vllm_prefix_cache_hit_rate_delta_pct",
+        "series_label": "Prefix Cache 命中率",
+        "series_group": "KV Cache",
+        "description": "每个采样周期内命中 token / 查询 token 的比率。它反映 prefix cache 当下是否真的在产生有效复用，而不只是索引规模变大。",
+        "render": "step",
+    },
+    "vllm.kv_cached_block_pct": {
+        "series_id": "vllm_kv_cached_block_pct",
+        "series_label": "Cached Block 覆盖率",
+        "series_group": "KV Cache",
+        "description": "cached blocks / 可调度总 blocks。它表示整个 block pool 里有多少比例已经带 hash，可被 prefix cache 追踪。",
+        "render": "step",
+    },
+    "vllm.kv_evictable_block_pct": {
+        "series_id": "vllm_kv_evictable_block_pct",
+        "series_label": "可驱逐 Cached Block 占比",
+        "series_group": "KV Cache",
+        "description": "free cached blocks / 可调度总 blocks。它越高，说明当前有更多 cached blocks 已不再被活跃请求持有，后续可能被直接复用或驱逐。",
+        "render": "step",
+    },
+    "vllm.kv_cold_free_block_pct": {
+        "series_id": "vllm_kv_cold_free_block_pct",
+        "series_label": "Cold Free Block 占比",
+        "series_group": "KV Cache",
+        "description": "free uncached blocks / 可调度总 blocks。它越高，allocator 越可能先消耗冷 block，而不是去动 cached blocks。",
+        "render": "step",
+    },
+    "vllm.kv_reserved_capacity_pct": {
+        "series_id": "vllm_kv_reserved_capacity_pct",
+        "series_label": "KV 保留容量占比",
+        "series_group": "KV Cache",
+        "description": "保留/未调度容量占已分配 KV 张量总容量的比例。它能帮助区分“显存已经分配了”与“scheduler 实际能调度多少”之间的落差。",
+        "render": "step",
+    },
     "vllm.kv_event_stored_blocks_delta": {
         "series_id": "vllm_kv_event_stored_blocks_delta",
         "series_label": "新写入 Cache Block",
@@ -168,6 +252,13 @@ _METRIC_SERIES_SPECS = {
         "series_label": "整表清空次数",
         "series_group": "KV Events",
         "description": "每个采样周期内 prefix cache 被整体清空的次数。",
+        "render": "step",
+    },
+    "vllm.kv_event_net_cached_blocks_delta": {
+        "series_id": "vllm_kv_event_net_cached_blocks_delta",
+        "series_label": "Cache Block 净增量",
+        "series_group": "KV Events",
+        "description": "每个采样周期内新写入 block 数减去驱逐 block 数。它可以直接看出 prefix cache 在增长、持平还是被回收。",
         "render": "step",
     },
 }
@@ -941,6 +1032,90 @@ def _build_metric_series(
     )
 
 
+def _augment_metric_samples(samples: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    snapshot_fields: dict[tuple[int, str, str], dict[str, Any]] = {}
+    augmented = list(samples)
+
+    for sample in samples:
+        timestamp_ns = sample.get("timestamp_ns")
+        name = str(sample.get("name") or "")
+        if timestamp_ns is None or not name:
+            continue
+        attrs = sample.get("attrs") or {}
+        process_label = str(sample.get("process_label") or "process")
+        engine_label = str(attrs.get("engine") or process_label or "engine")
+        key = (int(timestamp_ns), process_label, engine_label)
+        snapshot = snapshot_fields.setdefault(
+            key,
+            {
+                "prototype": sample,
+                "values": {},
+            },
+        )
+        try:
+            snapshot["values"][name] = float(sample.get("value", 0.0))
+        except (TypeError, ValueError):
+            continue
+
+    def emit(snapshot: dict[str, Any], metric_name: str, value: float, unit: str) -> None:
+        prototype = snapshot["prototype"]
+        augmented.append(
+            {
+                **prototype,
+                "name": metric_name,
+                "unit": unit,
+                "kind": "gauge",
+                "value": round(float(value), 6),
+            }
+        )
+
+    for snapshot in snapshot_fields.values():
+        values = snapshot["values"]
+        total_blocks = values.get("vllm.kv_blocks_total")
+        if total_blocks and total_blocks > 0:
+            cached_blocks = values.get("vllm.kv_cached_blocks")
+            if cached_blocks is not None:
+                emit(snapshot, "vllm.kv_cached_block_pct", cached_blocks * 100.0 / total_blocks, "%")
+            evictable_blocks = values.get("vllm.kv_blocks_free_cached")
+            if evictable_blocks is not None:
+                emit(snapshot, "vllm.kv_evictable_block_pct", evictable_blocks * 100.0 / total_blocks, "%")
+            cold_free_blocks = values.get("vllm.kv_blocks_free_uncached")
+            if cold_free_blocks is not None:
+                emit(snapshot, "vllm.kv_cold_free_block_pct", cold_free_blocks * 100.0 / total_blocks, "%")
+
+        prefix_queries = values.get("vllm.prefix_cache_queries_delta")
+        prefix_hits = values.get("vllm.prefix_cache_hits_delta")
+        if prefix_queries is not None and prefix_queries > 0 and prefix_hits is not None:
+            emit(
+                snapshot,
+                "vllm.prefix_cache_hit_rate_delta_pct",
+                prefix_hits * 100.0 / prefix_queries,
+                "%",
+            )
+
+        allocated_bytes = values.get("vllm.kv_cache_allocated_bytes")
+        reserved_bytes = values.get("vllm.kv_cache_reserved_bytes")
+        if allocated_bytes is not None and allocated_bytes > 0 and reserved_bytes is not None:
+            emit(
+                snapshot,
+                "vllm.kv_reserved_capacity_pct",
+                reserved_bytes * 100.0 / allocated_bytes,
+                "%",
+            )
+
+        stored_blocks = values.get("vllm.kv_event_stored_blocks_delta")
+        removed_blocks = values.get("vllm.kv_event_removed_blocks_delta")
+        if stored_blocks is not None or removed_blocks is not None:
+            emit(
+                snapshot,
+                "vllm.kv_event_net_cached_blocks_delta",
+                float(stored_blocks or 0.0) - float(removed_blocks or 0.0),
+                "blocks",
+            )
+
+    return augmented
+
+
 def _load_step_spans(trace_dir: str, step: int) -> list[dict[str, Any]]:
     step_dir = Path(trace_dir) / "raw" / "steps" / f"step_{step:06d}"
     spans: list[dict[str, Any]] = []
@@ -981,7 +1156,7 @@ def _filter_misc_spans_by_step_window(
         return []
 
     coherent_step_spans, _ = _filter_incoherent_spans([s for s in step_spans if s.get("step") is not None])
-    latest_step_spans, _ = _select_latest_session_spans(coherent_step_spans)
+    latest_step_spans, _, _ = _select_latest_session_spans(coherent_step_spans)
     root_candidates = [
         span
         for span in latest_step_spans
@@ -1046,18 +1221,28 @@ def _filter_incoherent_spans(spans: list[dict[str, Any]]) -> tuple[list[dict[str
     return filtered, dropped
 
 
-def _select_latest_session_spans(spans: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _latest_session_window_ns(spans: list[dict[str, Any]]) -> tuple[int, int] | None:
     root_spans = [
         span
         for span in spans
         if span.get("name") == "pipeline.step" and span.get("process_label") == "driver"
     ]
     if len(root_spans) <= 1:
-        return spans, []
+        return None
 
     latest_root = max(root_spans, key=lambda span: int(span["end_time_ns"]))
     window_start_ns = int(latest_root["start_time_ns"]) - _SESSION_CLUSTER_PADDING_NS
     window_end_ns = int(latest_root["end_time_ns"]) + _SESSION_CLUSTER_PADDING_NS
+    return window_start_ns, window_end_ns
+
+
+def _select_latest_session_spans(
+    spans: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], tuple[int, int] | None]:
+    session_window_ns = _latest_session_window_ns(spans)
+    if session_window_ns is None:
+        return spans, [], None
+    window_start_ns, window_end_ns = session_window_ns
 
     selected: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
@@ -1069,6 +1254,26 @@ def _select_latest_session_spans(spans: list[dict[str, Any]]) -> tuple[list[dict
         else:
             dropped.append(span)
 
+    return selected, dropped, session_window_ns
+
+
+def _filter_samples_to_time_window(
+    samples: list[dict[str, Any]],
+    window_start_ns: int,
+    window_end_ns: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    selected: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for sample in samples:
+        timestamp_ns = sample.get("timestamp_ns")
+        if timestamp_ns is None:
+            selected.append(sample)
+            continue
+        sample_ts = int(timestamp_ns)
+        if window_start_ns <= sample_ts <= window_end_ns:
+            selected.append(sample)
+        else:
+            dropped.append(sample)
     return selected, dropped
 
 
@@ -1079,8 +1284,16 @@ def _build_step_bundle(spans: list[dict[str, Any]], samples: list[dict[str, Any]
 
     # Apply filters only to step spans (they have pipeline.step roots)
     step_spans, incoherent = _filter_incoherent_spans(step_spans)
-    step_spans, stale_session = _select_latest_session_spans(step_spans)
+    step_spans, stale_session, session_window_ns = _select_latest_session_spans(step_spans)
     dropped_spans = incoherent + stale_session
+    if session_window_ns is not None:
+        samples, dropped_samples = _filter_samples_to_time_window(
+            samples,
+            window_start_ns=session_window_ns[0],
+            window_end_ns=session_window_ns[1],
+        )
+    else:
+        dropped_samples = []
 
     # Re-attach misc spans without filtering (env spans don't have pipeline.step root,
     # so session filtering is inappropriate for them)
@@ -1093,8 +1306,17 @@ def _build_step_bundle(spans: list[dict[str, Any]], samples: list[dict[str, Any]
             step,
             dict(Counter(span["category"] for span in dropped_spans)),
         )
+    if dropped_samples:
+        logger.warning(
+            "Dropped %s metric samples while exporting step %s because they fall outside the latest trace session.",
+            len(dropped_samples),
+            step,
+        )
 
-    if not spans:
+    if samples:
+        samples = _augment_metric_samples(samples)
+
+    if not spans and not samples:
         return {
             "step": step,
             "summary": {
@@ -1167,7 +1389,10 @@ def _build_step_bundle(spans: list[dict[str, Any]], samples: list[dict[str, Any]
     _enrich_inference_rows(rows)
 
     category_counter = Counter(span["category"] for span in spans)
-    process_labels = sorted({span.get("process_label") or "process" for span in spans})
+    process_labels = sorted(
+        {span.get("process_label") or "process" for span in spans}
+        | {sample.get("process_label") or "process" for sample in samples}
+    )
     stage_stats = _build_stage_stats(rows)
     trajectory_stats = _build_trajectory_stats(rows)
     lanes = _build_lanes(rows, trajectory_stats)
@@ -1198,6 +1423,8 @@ def _build_step_bundle(spans: list[dict[str, Any]], samples: list[dict[str, Any]
         )
     if dropped_spans:
         notes.append(f"导出这个 step 前，已过滤掉 {len(dropped_spans)} 个时间戳异常的 span。")
+    if dropped_samples:
+        notes.append(f"顶部状态时序图已额外过滤掉 {len(dropped_samples)} 个不属于当前 session 的指标点。")
     if not overview["preview_available"] and overview["inference_request_count"] > 0:
         notes.append(
             "当前这批 raw trace 还没有消息预览字段。"
@@ -1207,6 +1434,31 @@ def _build_step_bundle(spans: list[dict[str, Any]], samples: list[dict[str, Any]
         notes.append(
             "顶部状态时序图只展示当前 step 内采到的指标点。"
             "KV block / scheduler 占用来自 vLLM engine-core 真值；preemption、prefix cache、cache store/evict/clear 展示的是每个采样周期内的真实增量。"
+        )
+    if any(
+        item["series_name"]
+        in {
+            "vllm.prefix_cache_hit_rate_delta_pct",
+            "vllm.kv_cached_block_pct",
+            "vllm.kv_evictable_block_pct",
+            "vllm.kv_cold_free_block_pct",
+            "vllm.kv_reserved_capacity_pct",
+            "vllm.kv_event_net_cached_blocks_delta",
+        }
+        for item in metric_series
+    ):
+        notes.append(
+            "部分比率/净增量曲线不是 raw sample 直接上报的字段，而是基于同一时间戳的 KV snapshot 派生出来的，"
+            "这样 HTML 里能直接看出命中率、cache 覆盖率、可驱逐比例、冷空闲比例以及 cache 净增长。"
+        )
+    if any(
+        item["series_name"] in {"vllm.kv_cache_total_bytes", "vllm.kv_cache_allocated_bytes", "vllm.kv_cache_reserved_bytes"}
+        for item in metric_series
+    ):
+        notes.append(
+            "容量类曲线里，“KV 可调度总容量”表示当前 scheduler 真正可分配给请求的空间；"
+            "“KV 张量总容量”表示 worker 已分配出的全部 KV 张量字节数；"
+            "两者之间的差值会落到“KV 保留/未调度容量”，通常对应 null block 或多 rank 对齐后未参与调度的尾部空间。"
         )
 
     return {
@@ -1654,7 +1906,7 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
           </div>
         </section>
         <section class="panel timeline-panel">
-          <div class="viewport">
+          <div id="timeline-viewport" class="viewport">
             <svg id="chart"></svg>
           </div>
         </section>
@@ -1767,6 +2019,7 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
     const metricChart = document.getElementById('metric-chart');
     const metricViewport = document.getElementById('metric-viewport');
     const metricEmpty = document.getElementById('metric-empty');
+    const timelineViewport = document.getElementById('timeline-viewport');
     const chart = document.getElementById('chart');
     const zoom = document.getElementById('zoom');
     const zoomLabel = document.getElementById('zoom-label');
@@ -1803,7 +2056,11 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
     const windowMs = Math.max(data.summary?.window_ms || 1, 1);
     const timeUnit = chooseTimeUnit(windowMs);
     const windowUnits = Math.max(windowMs / timeUnit.factor, 1);
+    const TIME_AXIS_LEFT_PAD = 330;
+    const TIME_AXIS_RIGHT_PAD = 28;
+    const TIME_AXIS_TICK_TARGET_PX = 120;
     let selectedEventId = null;
+    let activeScrollSyncSource = null;
 
     function createSvg(tag) {
       return document.createElementNS(svgNS, tag);
@@ -1857,6 +2114,45 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
       return text.length <= limit ? text : text.slice(0, limit);
     }
 
+    function currentZoomValue() {
+      return parseFloat(zoom.value || '18');
+    }
+
+    function getTimeAxisLayout() {
+      const zoomValue = currentZoomValue();
+      const viewportPlotWidth = Math.max(
+        (metricViewport.clientWidth || 0) - TIME_AXIS_LEFT_PAD - TIME_AXIS_RIGHT_PAD,
+        (timelineViewport.clientWidth || 0) - TIME_AXIS_LEFT_PAD - TIME_AXIS_RIGHT_PAD,
+        0,
+      );
+      const plotWidth = Math.max(Math.ceil(windowUnits * zoomValue), viewportPlotWidth, 180);
+      const tickCount = Math.max(4, Math.min(12, Math.floor(plotWidth / TIME_AXIS_TICK_TARGET_PX)));
+      const tickStepMs = niceStep(windowMs / tickCount);
+      return {
+        plotWidth,
+        chartWidth: TIME_AXIS_LEFT_PAD + plotWidth + TIME_AXIS_RIGHT_PAD,
+        leftPad: TIME_AXIS_LEFT_PAD,
+        rightPad: TIME_AXIS_RIGHT_PAD,
+        tickStepMs,
+        xForOffset(offsetMs) {
+          const clamped = Math.max(0, Math.min(offsetMs, windowMs));
+          return TIME_AXIS_LEFT_PAD + (clamped / windowMs) * plotWidth;
+        },
+      };
+    }
+
+    function mirrorViewportScroll(source, target) {
+      if (!target || target.hidden) return;
+      if (activeScrollSyncSource === target) return;
+      activeScrollSyncSource = source;
+      target.scrollLeft = source.scrollLeft;
+      requestAnimationFrame(() => {
+        if (activeScrollSyncSource === source) {
+          activeScrollSyncSource = null;
+        }
+      });
+    }
+
     function visibleLanes() {
       return lanes
         .map((lane) => ({
@@ -1869,6 +2165,10 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
     function metricColorForSeries(series, index) {
       const paletteIndex = (index + Array.from(series.series_key || '').reduce((sum, ch) => sum + ch.charCodeAt(0), 0)) % metricPalette.length;
       return metricPalette[paletteIndex];
+    }
+
+    function metricSeriesContext(series) {
+      return (series.process_label || 'process') + ' · ' + (series.engine_label || 'engine');
     }
 
     function formatBytes(value) {
@@ -1923,27 +2223,22 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
       metricEmpty.hidden = true;
       metricViewport.hidden = false;
 
-      const viewportWidth = Math.max(metricViewport.clientWidth || 0, 860);
-      const zoomValue = parseFloat(zoom.value || '18');
-      const width = Math.max(viewportWidth, windowUnits * zoomValue);
-      const leftPad = 168;
-      const rightPad = 28;
+      const axis = getTimeAxisLayout();
+      const width = axis.chartWidth;
+      const leftPad = axis.leftPad;
+      const rightPad = axis.rightPad;
       const topPad = 18;
       const rowHeight = 62;
       const bottomPad = 26;
       const height = topPad + metricSeries.length * rowHeight + bottomPad;
-      const plotWidth = Math.max(width - leftPad - rightPad, 180);
-      const xForOffset = (offsetMs) => leftPad + (Math.max(0, Math.min(offsetMs, windowMs)) / windowMs) * plotWidth;
 
       metricChart.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
       metricChart.setAttribute('width', width);
       metricChart.setAttribute('height', height);
       metricChart.textContent = '';
 
-      const tickCount = Math.max(4, Math.min(12, Math.floor(plotWidth / 120)));
-      const tickStepMs = niceStep(windowMs / tickCount);
-      for (let tickMs = 0; tickMs <= windowMs + 0.0001; tickMs += tickStepMs) {
-        const x = xForOffset(tickMs);
+      for (let tickMs = 0; tickMs <= windowMs + axis.tickStepMs * 0.0001; tickMs += axis.tickStepMs) {
+        const x = axis.xForOffset(tickMs);
         const grid = createSvg('line');
         grid.setAttribute('x1', x);
         grid.setAttribute('x2', x);
@@ -1956,7 +2251,7 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
         label.setAttribute('x', x + 4);
         label.setAttribute('y', height - 8);
         label.setAttribute('class', 'axis-label');
-        label.textContent = formatUnitValue(tickMs / timeUnit.factor, tickStepMs / timeUnit.factor);
+        label.textContent = formatUnitValue(tickMs / timeUnit.factor, axis.tickStepMs / timeUnit.factor);
         metricChart.appendChild(label);
       }
 
@@ -1988,14 +2283,14 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
         label.setAttribute('x', 14);
         label.setAttribute('y', rowTop + 18);
         label.setAttribute('class', 'metric-series-label');
-        label.textContent = series.series_label;
+        label.textContent = series.series_label + ' · ' + (series.process_label || 'process');
         metricChart.appendChild(label);
 
         const meta = createSvg('text');
         meta.setAttribute('x', 14);
         meta.setAttribute('y', rowTop + 35);
         meta.setAttribute('class', 'metric-series-meta');
-        meta.textContent = (series.engine_label || 'engine') + ' · latest ' + formatSeriesValue(series, Number(series.latest_value || 0));
+        meta.textContent = metricSeriesContext(series) + ' · latest ' + formatSeriesValue(series, Number(series.latest_value || 0));
         metricChart.appendChild(meta);
 
         const range = createSvg('text');
@@ -2006,7 +2301,7 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
         metricChart.appendChild(range);
 
         const path = createSvg('path');
-        path.setAttribute('d', buildMetricPath(series, xForOffset, yForValue));
+        path.setAttribute('d', buildMetricPath(series, axis.xForOffset, yForValue));
         path.setAttribute('class', 'metric-path');
         path.setAttribute('stroke', color);
         metricChart.appendChild(path);
@@ -2015,14 +2310,14 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
         (series.points || []).forEach((point, pointIndex) => {
           if (pointIndex % pointStep !== 0 && pointIndex !== series.points.length - 1) return;
           const circle = createSvg('circle');
-          circle.setAttribute('cx', xForOffset(point.offset_ms));
+          circle.setAttribute('cx', axis.xForOffset(point.offset_ms));
           circle.setAttribute('cy', yForValue(point.value));
           circle.setAttribute('r', pointIndex === series.points.length - 1 ? 3.2 : 2.3);
           circle.setAttribute('class', 'metric-point');
           circle.setAttribute('fill', color);
           circle.addEventListener('mousemove', (evt) => {
             showTooltip(evt, {
-              title: series.series_label + ' · ' + (series.engine_label || 'engine'),
+              title: series.series_label + ' · ' + metricSeriesContext(series),
               stage_label: series.series_label,
               stage_group: series.series_group || 'Metrics',
               start_offset_ms: point.offset_ms,
@@ -2031,6 +2326,8 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
                 当前值: formatSeriesValue(series, point.value),
                 时间偏移: formatMs(point.offset_ms),
                 单位: series.unit || 'n/a',
+                进程: series.process_label || 'process',
+                Engine: series.engine_label || 'engine',
                 说明: series.description,
               },
             });
@@ -2350,24 +2647,24 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
     }
 
     function renderTimeline(visibleLaneItems) {
-      const pxPerUnit = Number(zoom.value);
       zoomLabel.firstChild.textContent = '缩放（' + timeUnit.label + '）';
 
-      const leftWidth = 330;
+      const axis = getTimeAxisLayout();
+      const leftWidth = axis.leftPad;
       const topPadding = 56;
       const laneHeight = 42;
       const laneGap = 10;
       const barHeight = 18;
-      const chartWidth = leftWidth + Math.max(900, Math.ceil(windowUnits * pxPerUnit) + 120);
+      const pxPerMs = axis.plotWidth / windowMs;
+      const chartWidth = axis.chartWidth;
       const chartHeight = topPadding + Math.max(1, visibleLaneItems.length) * (laneHeight + laneGap) + 34;
 
       chart.setAttribute('width', chartWidth);
       chart.setAttribute('height', chartHeight);
       chart.innerHTML = '';
 
-      const tickStep = niceStep(90 / pxPerUnit);
-      for (let tick = 0, value = 0; value <= windowUnits + tickStep * 0.5; tick += 1, value += tickStep) {
-        const x = leftWidth + value * pxPerUnit;
+      for (let tick = 0, tickMs = 0; tickMs <= windowMs + axis.tickStepMs * 0.0001; tick += 1, tickMs += axis.tickStepMs) {
+        const x = axis.xForOffset(tickMs);
         const grid = createSvg('line');
         grid.setAttribute('x1', x);
         grid.setAttribute('x2', x);
@@ -2381,7 +2678,7 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
         label.setAttribute('x', x + 3);
         label.setAttribute('y', 26);
         label.setAttribute('class', 'axis-label');
-        label.textContent = formatUnitValue(value, tickStep);
+        label.textContent = formatUnitValue(tickMs / timeUnit.factor, axis.tickStepMs / timeUnit.factor);
         chart.appendChild(label);
       }
 
@@ -2431,8 +2728,8 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
         chart.appendChild(meta);
 
         for (const event of lane.visibleEvents) {
-          const x = leftWidth + (event.start_offset_ms / timeUnit.factor) * pxPerUnit;
-          const width = Math.max(1.8, (event.duration_ms / timeUnit.factor) * pxPerUnit);
+          const x = axis.xForOffset(event.start_offset_ms);
+          const width = Math.max(1.8, event.duration_ms * pxPerMs);
           const rect = createSvg('rect');
           rect.setAttribute('x', x);
           rect.setAttribute('y', y + 7);
@@ -2476,11 +2773,16 @@ def _render_step_html(bundle: dict[str, Any]) -> str:
         ((data.summary?.dropped_spans || 0) > 0 ? ' · 过滤异常 span ' + data.summary.dropped_spans + ' 个' : '');
       renderMetricSeries();
       renderTimeline(visibleLaneItems);
+      if (!metricViewport.hidden) {
+        mirrorViewportScroll(timelineViewport, metricViewport);
+      }
       renderDetail();
     }
 
     const defaultZoom = Math.max(0.4, Math.min(72, 2400 / windowUnits));
     zoom.value = defaultZoom.toFixed(1);
+    metricViewport.addEventListener('scroll', () => mirrorViewportScroll(metricViewport, timelineViewport), { passive: true });
+    timelineViewport.addEventListener('scroll', () => mirrorViewportScroll(timelineViewport, metricViewport), { passive: true });
     zoom.addEventListener('input', render);
     window.addEventListener('resize', hideTooltip);
     window.addEventListener('scroll', hideTooltip);

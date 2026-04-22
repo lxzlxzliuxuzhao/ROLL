@@ -18,6 +18,7 @@ from roll.models.model_providers import default_tokenizer_provider, default_proc
 from roll.pipeline.agentic.agentic_config import EnvManagerConfig
 from roll.utils.checkpoint_manager import download_model
 from roll.utils.import_utils import safe_import_class
+from roll.utils.tracing import flush_trace_managers
 
 
 class EnvironmentWorker(Worker):
@@ -127,3 +128,7 @@ class EnvironmentWorker(Worker):
     async def stop(self):
         for env_manager in self.env_managers.values():
             env_manager.stop()
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL, clear_cache=False)
+    async def flush_traces(self, step: Optional[int] = None):
+        flush_trace_managers(step=step)

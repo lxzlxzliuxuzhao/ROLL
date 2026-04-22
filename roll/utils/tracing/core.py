@@ -376,6 +376,18 @@ class NullTraceManager:
         return None
 
 
+def flush_trace_managers(step: Optional[int] = None) -> None:
+    current_pid = os.getpid()
+    with _TRACE_MANAGER_LOCK:
+        managers = [
+            manager
+            for (_output_dir, pid), manager in _TRACE_MANAGERS.items()
+            if pid == current_pid
+        ]
+    for manager in managers:
+        manager.flush(step=step)
+
+
 class TraceManager:
     def __init__(self, config: TracingConfig, base_output_dir: Optional[str] = None, component: Optional[str] = None):
         self.config = config

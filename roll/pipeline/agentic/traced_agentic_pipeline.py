@@ -51,6 +51,14 @@ def is_lora_training(pipeline_config: AgenticConfig) -> bool:
     return pipeline_config.actor_train.model_args.lora_target is not None
 
 class TracedAgenticPipeline(BasePipeline):
+    def _flush_remote_traces(self, step: int) -> None:
+        remote_flush_refs = [
+            self.train_rollout_scheduler.flush_traces.remote(step),
+            self.val_rollout_scheduler.flush_traces.remote(step),
+        ]
+        remote_flush_refs.extend(self.actor_infer.execute_all_async("flush_traces", step))
+        ray.get(remote_flush_refs)
+
     def __init__(self, pipeline_config: AgenticConfig):
         super().__init__(pipeline_config)
         self.pipeline_config: AgenticConfig
@@ -621,8 +629,9 @@ class TracedAgenticPipeline(BasePipeline):
 
             # Tracing: flush spans and export HTML for this step
             _step_span.__exit__(None, None, None)
-            tracer.maybe_export_step(global_step)
             tracer.flush()
+            self._flush_remote_traces(global_step)
+            tracer.maybe_export_step(global_step)
 
             logger.info(f"pipeline step {global_step} finished")
             global_step += 1

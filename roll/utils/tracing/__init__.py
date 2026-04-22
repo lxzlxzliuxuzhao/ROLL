@@ -12,6 +12,7 @@ from roll.utils.tracing.core import (
     TraceManager,
     TraceSpan,
     TracingConfig,
+    flush_trace_managers,
     get_trace_manager,
 )
 from roll.utils.tracing.exporter import export_trace_directory, export_trace_step
@@ -30,6 +31,7 @@ __all__ = [
     "TraceManager",
     "TraceSpan",
     "TracingConfig",
+    "flush_trace_managers",
     "get_trace_manager",
     # Phase definitions
     "TracePhaseDefinition",
