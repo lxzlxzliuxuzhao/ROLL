@@ -131,6 +131,7 @@ class Cluster:
                 "CLUSTER_NAME": self.cluster_name,
                 "WORKER_NAME": worker_name,
             }
+            env_vars.update(current_platform.get_custom_env_vars())
 
             if rank != 0:
                 env_vars["MASTER_ADDR"] = self.master_addr

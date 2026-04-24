@@ -109,6 +109,8 @@ def _configure_lmcache(kwargs: Dict) -> bool:
     lmcache_config = kwargs.pop("lmcache_config", None)
     if lmcache_config is None:
         return False
+    lmcache_config = dict(lmcache_config)
+    lmcache_config.setdefault("pre_caching_hash_algorithm", "sha256_cbor")
 
     if "kv_transfer_config" in kwargs:
         raise ValueError("`lmcache_config` can not be used together with `kv_transfer_config`.")

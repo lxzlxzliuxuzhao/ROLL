@@ -128,6 +128,7 @@ actor_infer:
       enable_prefix_caching: true
       lmcache_config:
         chunk_size: 256
+        pre_caching_hash_algorithm: sha256_cbor
         local_cpu: true
         max_local_cpu_size: 200.0
         use_layerwise: false

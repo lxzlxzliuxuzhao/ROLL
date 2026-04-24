@@ -112,7 +112,10 @@ class Platform:
 
     @classmethod
     def get_common_envs(cls) -> dict:
-        envs = {"TORCH_EXTENSIONS_DIR": ""}
+        envs = {
+            "TORCH_EXTENSIONS_DIR": "",
+            "PYTHONHASHSEED": os.environ.get("PYTHONHASHSEED", "0"),
+        }
         for key in (
             "ROLL_TRACE_ENABLE", "ROLL_TRACE_DIR", "ROLL_TRACE_TIMESTAMP",
             "ROLL_TRACE_TIMESTAMP_OUTPUT_DIR", "ROLL_TRACE_EXPORT_HTML",

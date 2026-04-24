@@ -41,6 +41,7 @@ def test_configure_lmcache_sets_env_and_transfer_config():
         assert os.environ["LMCACHE_CHUNK_SIZE"] == "256"
         assert os.environ["LMCACHE_LOCAL_CPU"] == "True"
         assert os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] == "16.0"
+        assert os.environ["LMCACHE_PRE_CACHING_HASH_ALGORITHM"] == "sha256_cbor"
 
         kv_transfer_config = kwargs["kv_transfer_config"]
         assert kv_transfer_config.kv_connector == "LMCacheConnectorV1Dynamic"
@@ -54,6 +55,7 @@ def test_configure_lmcache_sets_env_and_transfer_config():
             "lmcache.chunk_size": 256,
             "lmcache.local_cpu": True,
             "lmcache.max_local_cpu_size": 16.0,
+            "lmcache.pre_caching_hash_algorithm": "sha256_cbor",
             "discard_partial_chunks": False
         }
 

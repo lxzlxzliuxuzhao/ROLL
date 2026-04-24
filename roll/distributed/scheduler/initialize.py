@@ -36,6 +36,8 @@ def start_ray_cluster():
         logger.info("Ray cluster already initialized")
         return False
 
+    os.environ.setdefault("PYTHONHASHSEED", "0")
+
     if rank == 0:
         cmd = f"ray start --head --port={master_port} --node-name={node_name} --dashboard-port={dashboard_port}"
     else:
