@@ -1,0 +1,14 @@
+defaults:
+  - agent_rollout_rock_swe_traced
+  - _self_
+
+exp_name: "agentic_rollout_swe_no_lmcache_sweep"
+
+actor_infer:
+  strategy_args:
+    strategy_config:
+      enable_prefix_caching: true
+      lmcache_config: null
+
+agentic_kv:
+  enable: false

@@ -130,8 +130,12 @@ class TracingConfig:
         else:
             resolved_output_dir = os.environ.get("ROLL_TRACE_DIR", "./output/traces")
 
+        resolved_output_dir = os.path.abspath(os.path.expanduser(resolved_output_dir))
+
         if self.timestamp_output_dir:
             resolved_output_dir = _append_trace_timestamp(resolved_output_dir)
+            self.output_dir = resolved_output_dir
+        else:
             self.output_dir = resolved_output_dir
 
         return resolved_output_dir
@@ -386,6 +390,8 @@ def flush_trace_managers(step: Optional[int] = None) -> None:
         ]
     for manager in managers:
         manager.flush(step=step)
+        if step is not None:
+            manager.flush()
 
 
 class TraceManager:

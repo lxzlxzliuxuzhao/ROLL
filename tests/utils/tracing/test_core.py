@@ -23,6 +23,7 @@ def test_apply_env_canonicalizes_trace_dir(monkeypatch):
     config.apply_env()
 
     assert Path(os.environ["ROLL_TRACE_DIR"]).name == "traces_20260416_153012"
+    assert Path(os.environ["ROLL_TRACE_DIR"]).is_absolute()
     assert os.environ["ROLL_TRACE_TIMESTAMP_OUTPUT_DIR"] == "1"
 
 
@@ -31,7 +32,16 @@ def test_resolve_output_dir_can_disable_timestamp(monkeypatch):
 
     config = TracingConfig(enable=True, output_dir="./output/traces", timestamp_output_dir=False)
 
-    assert config.resolve_output_dir() == "./output/traces"
+    assert config.resolve_output_dir() == str(Path("./output/traces").resolve())
+
+
+def test_resolve_output_dir_uses_absolute_env_trace_dir(monkeypatch):
+    monkeypatch.setenv("ROLL_TRACE_DIR", "./output/traces")
+    monkeypatch.setenv("ROLL_TRACE_TIMESTAMP", "20260416_153012")
+
+    config = TracingConfig.from_env()
+
+    assert config.resolve_output_dir() == str(Path("./output/traces_20260416_153012").resolve())
 
 
 def test_trace_manager_flushes_metric_samples(tmp_path):
@@ -78,3 +88,19 @@ def test_flush_trace_managers_flushes_existing_process_managers(tmp_path):
     assert len(records) == 1
     assert records[0]["name"] == "vllm.kv_blocks_used"
     assert records[0]["value"] == 12
+
+
+def test_step_flush_also_flushes_misc_spans(tmp_path):
+    config = TracingConfig(enable=True, output_dir=str(tmp_path), timestamp_output_dir=False)
+    manager = get_trace_manager(config=config, component="env_3")
+
+    with manager.span("trajectory.step", phase="trajectory", attrs={"env_id": 3}):
+        pass
+
+    flush_trace_managers(step=0)
+
+    misc_path = tmp_path / "raw" / "misc" / f"env_3-pid{os.getpid()}.jsonl"
+    assert misc_path.exists()
+    records = [json.loads(line) for line in misc_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(records) == 1
+    assert records[0]["name"] == "trajectory.step"

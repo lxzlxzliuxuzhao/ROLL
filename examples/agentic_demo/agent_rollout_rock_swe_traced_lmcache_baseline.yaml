@@ -1,0 +1,14 @@
+defaults:
+  - agent_rollout_rock_swe_traced
+  - _self_
+
+exp_name: "agentic_rollout_swe_lmcache_baseline"
+
+# Baseline LMCache mode: keep LMCache + AgenticKV enabled, but do not
+# force cached-free GPU KV blocks to zero. This is the comparison point
+# for active-only HBM scaling under batch pressure.
+agentic_kv:
+  enable: true
+  free_gpu_blocks_low_watermark: 256
+  free_gpu_blocks_high_watermark: 2048
+  max_cached_free_blocks: null

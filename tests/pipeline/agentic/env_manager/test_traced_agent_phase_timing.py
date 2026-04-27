@@ -45,7 +45,7 @@ def test_record_inference_phase_spans_uses_real_vllm_timing():
     manager._record_inference_phase_spans(
         tracer,
         request_span,
-        trace_attrs={"env_step": 0},
+        trace_attrs={"env_step": 0, "train_step": 17},
         sample_id="sample-1",
         traj_id="traj-1",
         request_id="req-1",
@@ -79,6 +79,7 @@ def test_record_inference_phase_spans_uses_real_vllm_timing():
     overhead_attrs = tracer.calls[3][1]["attrs"]
     metrics_attrs = tracer.calls[4][1]["attrs"]
 
+    assert [kwargs["step"] for _, kwargs in tracer.calls] == [17, 17, 17, 17, 17]
     assert wait_attrs["source"] == "vllm_v1_request_state"
     assert prefill_attrs["source"] == "vllm_v1_request_state"
     assert decode_attrs["source"] == "vllm_v1_request_state"

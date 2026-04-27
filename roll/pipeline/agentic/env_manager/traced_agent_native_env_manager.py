@@ -104,6 +104,18 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
         }
 
     @staticmethod
+    def _trace_step_from_attrs(trace_attrs: Dict[str, Any]) -> Optional[int]:
+        train_step = trace_attrs.get("train_step")
+        if train_step is None:
+            return None
+        trace_step = int(train_step)
+        return trace_step if trace_step >= 0 else None
+
+    def _current_trace_step(self) -> Optional[int]:
+        trace_step = int(getattr(self, "current_step", -1))
+        return trace_step if trace_step >= 0 else None
+
+    @staticmethod
     def _classify_step_kind(response: Any, tool_names: list[str], terminated: bool) -> str:
         if tool_names:
             return "tool_call"
@@ -302,6 +314,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
             "response_preview": response_preview,
             "timing_source": timing_source,
         }
+        trace_step = self._trace_step_from_attrs(trace_attrs)
         trace_context = request_span.child_context(sample_id=sample_id, traj_id=traj_id)
         cursor_ns = int(request_span.start_wall_ns)
         request_end_ns = int(request_span.end_wall_ns)
@@ -317,6 +330,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                 phase=phase,
                 category=category,
                 trace_context=trace_context,
+                step=trace_step,
                 sample_id=sample_id,
                 traj_id=traj_id,
                 attrs={**shared_attrs, "source": source},
@@ -333,6 +347,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                 phase="inference",
                 category="inference",
                 trace_context=trace_context,
+                step=trace_step,
                 sample_id=sample_id,
                 traj_id=traj_id,
                 attrs={
@@ -363,7 +378,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
         _base_attrs = {"env_id": env_id, "tag": tag, "group_id": group_id, "mode": mode}
 
         with Timer(name="reset", logger=None) as reset_timer:
-            _reset_span = tracer.span("env.reset", phase="env", attrs={**_base_attrs})
+            _reset_span = tracer.span("env.reset", phase="env", step=self._current_trace_step(), attrs={**_base_attrs})
             _reset_span.__enter__()
             rollout_cache: RolloutCache = self.reset()
             # Add episode_id to reset span after reset() completes
@@ -393,6 +408,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                         "rollout.put_batch",
                         phase="rollout",
                         attrs={**_base_attrs, "episode_id": self.episode_id, "traj_id": failed_traj_id, "drop_flag": True},
+                        step=self._current_trace_step(),
                         traj_id=failed_traj_id,
                     )
                     _put_span.__enter__()
@@ -403,6 +419,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                         "env.close",
                         phase="env",
                         attrs={**_base_attrs, "episode_id": self.episode_id, "traj_id": failed_traj_id},
+                        step=self._current_trace_step(),
                         traj_id=failed_traj_id,
                     )
                     _close_span.__enter__()
@@ -415,7 +432,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                     else:
                         time.sleep(10)
                     with Timer(name="reset", logger=None) as reset_timer:
-                        _reset_span = tracer.span("env.reset", phase="env", attrs={**_base_attrs})
+                        _reset_span = tracer.span("env.reset", phase="env", step=self._current_trace_step(), attrs={**_base_attrs})
                         _reset_span.__enter__()
                         rollout_cache = self.reset()
                         if hasattr(self, 'episode_id') and self.episode_id is not None:
@@ -434,6 +451,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                         "trajectory.lifetime",
                         phase="trajectory",
                         attrs={**_base_attrs, "episode_id": episode_id, "traj_id": traj_id},
+                        step=self._current_trace_step(),
                         traj_id=traj_id,
                     )
                     trajectory_span.__enter__()
@@ -444,11 +462,13 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                     traj_id=traj_id,
                     env_step=traj_env_step,
                 )
+                trace_step = self._trace_step_from_attrs(step_attrs)
                 sample_id = step_attrs["sample_id"]
                 _trajectory_step_span = tracer.span(
                     "trajectory.step",
                     phase="trajectory",
                     attrs=step_attrs,
+                    step=trace_step,
                     traj_id=traj_id,
                     sample_id=sample_id,
                 )
@@ -459,6 +479,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                             "inference.generate",
                             phase="inference",
                             attrs=step_attrs,
+                            step=trace_step,
                             traj_id=traj_id,
                             sample_id=sample_id,
                         )
@@ -489,6 +510,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                                 "env.step",
                                 phase="env",
                                 attrs={**step_attrs, **({"request_id": request_id} if request_id else {})},
+                                step=trace_step,
                                 traj_id=traj_id,
                                 sample_id=sample_id,
                             )
@@ -519,6 +541,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                             "start_step": start_step,
                             "sample_count": rollout.batch.batch_size[0],
                         },
+                        step=self._current_trace_step(),
                         traj_id=traj_id,
                     )
                     _put_span.__enter__()
@@ -616,6 +639,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
                 phase="trajectory",
                 category="trajectory",
                 attrs=tool_attrs,
+                step=self._trace_step_from_attrs(tool_attrs),
                 traj_id=traj_id,
                 sample_id=sample_id,
             )
@@ -710,6 +734,7 @@ class TracedAgentNativeStepEnvManager(TrajEnvManager):
             phase="inference",
             category="inference",
             trace_context=trace_context,
+            step=self._trace_step_from_attrs(request_attrs),
             sample_id=sample_id,
             traj_id=traj_id,
             attrs=request_attrs,
