@@ -379,7 +379,51 @@ class AgenticKVRuntime:
 
 ---
 
-## 7. 开放问题(实施前确认)
+## 7. 自适应吞吐目标(借鉴 TCP 拥塞控制)
 
-- `throughput_target` 在影子 PID 中如何定义? 候选: 历史窗口最大值 / roofline 估计 / 配置目标值。建议初版用历史窗口最大值的 EWMA,简单且自适应。
+### 7.1 问题
+
+影子 PID 需要 `throughput_target` 来计算误差 `e(t) = target - observed`,但 GPU 吞吐上限受多种因素动态影响(batch composition、KV cache 命中率、tool wait 分布),无法预先配置固定值。
+
+### 7.2 方案:AIMD 风格的自适应峰值探测
+
+借鉴 TCP 拥塞控制思路,动态探测并追踪"当前工作负载下的吞吐峰值":
+
+```python
+class AdaptiveThroughputTarget:
+    def __init__(self):
+        self.estimated_peak = 0.0  # 当前估计的峰值吞吐
+        self.ewma_alpha = 0.1      # 衰减系数
+    
+    def update(self, observed_throughput, kv_free_ratio):
+        # 观测到更高吞吐 + KV 有余量 → 上调峰值估计
+        if observed_throughput > self.estimated_peak and kv_free_ratio > 0.2:
+            self.estimated_peak = observed_throughput
+        # 否则用 EWMA 缓慢衰减(类似 TCP RTT 估计)
+        else:
+            self.estimated_peak = (self.ewma_alpha * observed_throughput + 
+                                   (1 - self.ewma_alpha) * self.estimated_peak)
+    
+    def get_target(self):
+        return self.estimated_peak * 0.95  # 目标是峰值的 95%,留 headroom
+```
+
+**优点:**
+- 自适应,无需配置
+- 冷启动自然:初始 `estimated_peak=0`,首次观测自动初始化
+- 工作负载变化时自动跟踪
+
+### 7.3 可选:启动时 Warmup 探测
+
+在 rollout 开始前,可选地运行短暂 warmup 阶段:
+
+- 用 dummy prompts 逐步增加并发(如 8 → 16 → 32 → 64)
+- 每个并发级别跑 2-3 个窗口,记录吞吐
+- 初始化 `estimated_peak` 为 warmup 中观测到的最大值
+- **不影响训练**:warmup 在 rollout 循环外,生成的 tokens 不进 buffer
+
+Warmup 可选,因为 AIMD 本身能在线探测,但 warmup 能加速收敛。
+
+### 7.4 开放问题
+
 - `select_ready_requests` 现有签名是否已支持注入 cap 限流? 如不支持,需要在阶段 1 的 RolloutScheduler 改造中先扩展接口。
