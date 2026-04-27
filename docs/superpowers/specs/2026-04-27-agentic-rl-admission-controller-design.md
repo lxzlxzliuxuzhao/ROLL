@@ -84,35 +84,41 @@ gpu_duty_cycle ≈ E[GPU 推理时间] / E[GPU 推理时间 + tool 等待时间]
 @dataclass(frozen=True)
 class BeaconSnapshot:
     timestamp: float
-    throughput_tokens_per_sec: float    # T̄: 滑动窗口平均
-    throughput_delta: float              # ΔT: 与上一窗口的差值/秒
-    kv_free_ratio: float                 # M: free_blocks / total_blocks ∈ [0,1]
+    decode_throughput_tokens_per_sec: float  # T̄: decode 吞吐,滑动窗口平均
+    decode_throughput_delta: float           # ΔT: decode 吞吐变化率
+    kv_free_ratio: float                     # M: free_blocks / total_blocks ∈ [0,1]
     inflight_requests: int
-    waiting_sessions: int                # tool_wait + sleeping_in_lmcache
+    waiting_sessions: int                    # tool_wait + sleeping_in_lmcache
     ready_to_resume_sessions: int
+    # 可选(阶段 2): prefill_throughput_tokens_per_sec
 ```
 
 **信号来源(全部已存在,无需改 vLLM/LMCache):**
 
-- **吞吐**: 累加 `inference.metrics` span 中已有的 generated tokens,按 `beacon_window_seconds` 滑窗
+- **Decode 吞吐**: 累加 `inference.metrics` span 中的 `num_generated_tokens`(仅 decode,不含 prefill),按 `beacon_window_seconds` 滑窗。**Decode 吞吐是核心指标**,因为:
+  - Agentic trajectory 时间占比: decode >> prefill
+  - Tool wait 空泡本质是"decode 停了"
+  - Goodput = 每秒生成的有效 output tokens
 - **KV 余量**: 复用现有 `FreeBlockWatermark`(`akv/watermark.py`)
 - **session 状态计数**: 通过新增 `AgenticKVRuntime.query_session_states()` 聚合
+
+**Prefill 吞吐**: 阶段 1 不采集。Prefill 本身慢不是问题,Prefill 拖慢 Decode 才是问题——这由 `active_request_cap` 隐式控制(限制新 request 进入速率)。阶段 2 如果影子日志显示需要显式 `prefill_budget`,再加入 prefill 吞吐监控。
 
 ### 3.2 StateClassifier(纯函数,可单测)
 
 ```python
 class SystemState(Enum):
-    COLD_START      = "cold_start"        # T̄ 低, ΔT 正, M 高
-    PARETO          = "pareto"            # T̄ 高, ΔT≈0, M 中/低
-    THRASHING       = "thrashing"         # T̄ 低, ΔT 负, M 低
-    TOOL_WAIT_BUBBLE = "tool_wait_bubble" # T̄ 低, ΔT 负或 0, M 高
+    COLD_START      = "cold_start"        # T̄_decode 低, ΔT 正, M 高
+    PARETO          = "pareto"            # T̄_decode 高, ΔT≈0, M 中/低
+    THRASHING       = "thrashing"         # T̄_decode 低, ΔT 负, M 低
+    TOOL_WAIT_BUBBLE = "tool_wait_bubble" # T̄_decode 低, ΔT 负或 0, M 高
     UNKNOWN         = "unknown"
 ```
 
 **分类阈值(模块内常量,初始基于经验,后续从影子日志校准):**
 
-- `throughput_high_ratio: 0.7`(相对 roofline 或历史峰值)
-- `throughput_delta_dead_zone: ±5%`(避免抖动)
+- `decode_throughput_high_ratio: 0.7`(相对历史峰值)
+- `decode_throughput_delta_dead_zone: ±5%`(避免抖动)
 - `kv_high_threshold: 0.4`、`kv_low_threshold: 0.15`
 
 ### 3.3 BudgetAllocator(阶段 1: 阈值规则)
@@ -152,11 +158,13 @@ class AdmissionDecision:
 阶段 1 同时运行 PD 控制器(无 I,避免积分饱和):
 
 ```
-e(t) = throughput_target - throughput_observed
+e(t) = decode_throughput_target - decode_throughput_observed
 pid_suggestion = current_cap + kP*e + kD*de/dt
 ```
 
 **只写入 tracing span,不参与决策。** `shadow_pid_suggestion` 与实际决策一起入 trace,后续离线分析。
+
+`decode_throughput_target` 由 §7 的自适应峰值探测提供。
 
 ---
 
@@ -379,29 +387,29 @@ class AgenticKVRuntime:
 
 ---
 
-## 7. 自适应吞吐目标(借鉴 TCP 拥塞控制)
+## 7. 自适应 Decode 吞吐目标(借鉴 TCP 拥塞控制)
 
 ### 7.1 问题
 
-影子 PID 需要 `throughput_target` 来计算误差 `e(t) = target - observed`,但 GPU 吞吐上限受多种因素动态影响(batch composition、KV cache 命中率、tool wait 分布),无法预先配置固定值。
+影子 PID 需要 `decode_throughput_target` 来计算误差 `e(t) = target - observed`,但 GPU decode 吞吐上限受多种因素动态影响(batch composition、KV cache 命中率、tool wait 分布),无法预先配置固定值。
 
 ### 7.2 方案:AIMD 风格的自适应峰值探测
 
-借鉴 TCP 拥塞控制思路,动态探测并追踪"当前工作负载下的吞吐峰值":
+借鉴 TCP 拥塞控制思路,动态探测并追踪"当前工作负载下的 decode 吞吐峰值":
 
 ```python
-class AdaptiveThroughputTarget:
+class AdaptiveDecodeThroughputTarget:
     def __init__(self):
-        self.estimated_peak = 0.0  # 当前估计的峰值吞吐
+        self.estimated_peak = 0.0  # 当前估计的 decode 峰值吞吐
         self.ewma_alpha = 0.1      # 衰减系数
     
-    def update(self, observed_throughput, kv_free_ratio):
-        # 观测到更高吞吐 + KV 有余量 → 上调峰值估计
-        if observed_throughput > self.estimated_peak and kv_free_ratio > 0.2:
-            self.estimated_peak = observed_throughput
+    def update(self, observed_decode_throughput, kv_free_ratio):
+        # 观测到更高 decode 吞吐 + KV 有余量 → 上调峰值估计
+        if observed_decode_throughput > self.estimated_peak and kv_free_ratio > 0.2:
+            self.estimated_peak = observed_decode_throughput
         # 否则用 EWMA 缓慢衰减(类似 TCP RTT 估计)
         else:
-            self.estimated_peak = (self.ewma_alpha * observed_throughput + 
+            self.estimated_peak = (self.ewma_alpha * observed_decode_throughput + 
                                    (1 - self.ewma_alpha) * self.estimated_peak)
     
     def get_target(self):
@@ -418,7 +426,7 @@ class AdaptiveThroughputTarget:
 在 rollout 开始前,可选地运行短暂 warmup 阶段:
 
 - 用 dummy prompts 逐步增加并发(如 8 → 16 → 32 → 64)
-- 每个并发级别跑 2-3 个窗口,记录吞吐
+- 每个并发级别跑 2-3 个窗口,记录 decode 吞吐
 - 初始化 `estimated_peak` 为 warmup 中观测到的最大值
 - **不影响训练**:warmup 在 rollout 循环外,生成的 tokens 不进 buffer
 
